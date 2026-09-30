@@ -43,6 +43,8 @@ the original text without adding wrappers.
 
 Run the [stdio harness](../../examples/messaging_stdio) to exercise routing without
 a platform bot token. Its mock-agent test runs without provider credentials.
+The [Discord example](../../examples/messaging_discord) provides guild threads,
+DMs and bounded attachment downloads in an isolated workspace.
 
 ## Status reactions
 
