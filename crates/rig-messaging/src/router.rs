@@ -25,6 +25,8 @@ pub struct ChatConfig {
     /// MIME types accepted by the model for both bytes and URLs.
     /// Empty by default. Other attachments become short text notes.
     pub attachment_mime_types: HashSet<String>,
+    /// Status reaction configuration. Unsupported adapters disable it automatically.
+    pub reactions: crate::reactions::ReactionConfig,
 }
 
 /// Routes inputs through one Agent with a mutex per conversation.
@@ -68,16 +70,33 @@ impl ChatRouter {
         if adapter.message_limit() == 0 {
             return Err(ChatError::InvalidMessageLimit);
         }
+        let reactions = Arc::new(crate::reactions::StatusReactions::new(
+            adapter.clone(),
+            m.message.clone(),
+            self.cfg.reactions.clone(),
+        ));
+        reactions.set_queued().await;
         let key = m.reply_channel.session_key();
         let lock = {
             let mut locks = self.locks.lock().await;
             locks.entry(key.clone()).or_default().clone()
         };
         let guard = lock.lock().await;
+        reactions.set_thinking();
         let prompt = build_prompt(&m, &self.cfg);
-        let stream = self.agent.prompt(prompt).conversation(key.clone()).stream();
+        let stream = self
+            .agent
+            .prompt(prompt)
+            .conversation(key.clone())
+            .add_hook(crate::reactions::ReactionHook::new(reactions.clone()))
+            .stream();
         let result =
             crate::egress::egress(adapter.as_ref(), &m.reply_channel, stream, &self.cfg).await;
+        if result.is_ok() {
+            reactions.set_done().await;
+        } else {
+            reactions.set_error().await;
+        }
         drop(guard);
         let mut locks = self.locks.lock().await;
         drop(lock);
@@ -86,6 +105,19 @@ impl ChatRouter {
             .is_some_and(|entry| Arc::strong_count(entry) == 1)
         {
             locks.remove(&key);
+        }
+        drop(locks);
+        if self.cfg.reactions.remove_after_reply
+            && self.cfg.reactions.enabled
+            && adapter.supports_reactions()
+        {
+            let hold = if result.is_ok() {
+                self.cfg.reactions.timing.done_hold_ms
+            } else {
+                self.cfg.reactions.timing.error_hold_ms
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(hold)).await;
+            reactions.clear().await;
         }
         result
     }

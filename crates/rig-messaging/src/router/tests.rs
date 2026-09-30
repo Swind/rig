@@ -53,7 +53,10 @@ async fn same_session_waits_and_loads_complete_history() -> Result<(), Box<dyn s
         Gate::default(),
         ChatConfig::default(),
     ));
-    let adapter = Arc::new(FakeAdapter::default());
+    let adapter = Arc::new(FakeAdapter {
+        reactions: true,
+        ..Default::default()
+    });
     let first = tokio::spawn({
         let router = router.clone();
         let adapter = adapter.clone();
@@ -75,6 +78,11 @@ async fn same_session_waits_and_loads_complete_history() -> Result<(), Box<dyn s
         tokio::task::yield_now().await;
     }
     assert_eq!(model.request_count(), 1);
+    assert!(
+        adapter
+            .calls()
+            .contains(&Call::Add(inbound("second").message, "👀".into()))
+    );
     release.notify_one();
     first.await??;
     second.await??;

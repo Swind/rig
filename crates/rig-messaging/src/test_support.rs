@@ -23,6 +23,8 @@ pub(crate) struct FakeAdapter {
     pub fail_sends: AtomicUsize,
     pub fail_edits: AtomicUsize,
     pub fail_deletes: AtomicBool,
+    pub fail_reactions: AtomicUsize,
+    pub reaction_block: Option<std::sync::Arc<tokio::sync::Notify>>,
     pub(crate) counter: AtomicUsize,
 }
 
@@ -37,6 +39,8 @@ impl Default for FakeAdapter {
             fail_sends: AtomicUsize::new(0),
             fail_edits: AtomicUsize::new(0),
             fail_deletes: AtomicBool::new(false),
+            fail_reactions: AtomicUsize::new(0),
+            reaction_block: None,
             counter: AtomicUsize::new(0),
         }
     }
@@ -128,7 +132,14 @@ impl ChatAdapter for FakeAdapter {
     ) -> WasmBoxedFuture<'a, Result<(), ChatError>> {
         Box::pin(async move {
             self.record(Call::Add(m.clone(), emoji.into()));
-            Ok(())
+            if let Some(block) = &self.reaction_block {
+                block.notified().await;
+            }
+            if Self::fails(&self.fail_reactions) {
+                Err(Self::error())
+            } else {
+                Ok(())
+            }
         })
     }
     fn remove_reaction<'a>(
@@ -138,7 +149,11 @@ impl ChatAdapter for FakeAdapter {
     ) -> WasmBoxedFuture<'a, Result<(), ChatError>> {
         Box::pin(async move {
             self.record(Call::Remove(m.clone(), emoji.into()));
-            Ok(())
+            if Self::fails(&self.fail_reactions) {
+                Err(Self::error())
+            } else {
+                Ok(())
+            }
         })
     }
 }

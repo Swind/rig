@@ -354,11 +354,12 @@ Copy from OpenAB. Allowed changes only:
 Port OpenAB `reactions.rs`, preserving behavior:
 
 - Methods: `set_queued` (immediate), `set_thinking` (debounced), `set_tool(name)` (debounced), `set_done`, `set_error`, `clear`.
-- State: `current` (the applied emoji) and `finished` (later updates are ignored once finished).
+- State: `current` (the applied emoji) and `finished` (later updates are ignored once finished). Update `current` only after addition succeeds. A failed addition leaves the prior status applied.
 - Debounce: do not reapply the same emoji; a new emoji is applied after `debounce_ms`, and a newer update within that window cancels the pending one.
 - Apply order: `add_reaction(new)` first, then `remove_reaction(old)`, so there is never a gap.
 - Stall timers reset on every transition. After `stall_soft_ms` without progress apply 🥱; after `stall_hard_ms` apply 😨.
 - `set_done` adds a random mood emoji in addition to 🆗.
+- When clearing, remove both the status and any mood applied by this controller.
 - Swallow and `tracing::debug` every adapter error. A failed reaction must never affect the reply.
 - `enabled` is derived from `adapter.supports_reactions()` and config. When disabled every method returns immediately.
 - Tool-name classification (case-insensitive substring):
@@ -392,7 +393,7 @@ impl AgentHook for ReactionHook { ... }
 
 Requirements:
 
-- **A hook must not wait on the network.** `set_tool` and `set_thinking` are debounced and send through `tokio::spawn`; the hook only updates internal state and returns. `on_dispatch` sits on the run's critical path, and blocking it slows every turn.
+- **A hook must not wait on the network.** `set_tool` and `set_thinking` are debounced and enqueue updates to a per-run worker started with `tokio::spawn`; the hook only sends an in-memory command and returns. The worker serializes network operations so stale updates cannot overtake terminal status. `on_dispatch` sits on the run's critical path, and blocking it slows every turn.
 - Always return `Proceed` or `Continue`. The hook observes and never changes the run.
 - Do not override `observes()`. The default already covers `ToolDispatch` and `CompletionDispatch`.
 - Do not drive reactions from `MultiTurnStreamItem::ToolExecutionCommitted`; it is emitted after the batch settles, not in real time.

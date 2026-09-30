@@ -10770,6 +10770,7 @@ name = "rig-messaging"
 version = "0.42.0"
 dependencies = [
  "bytes",
+ "fastrand",
  "futures",
  "pulldown-cmark",
  "regex",

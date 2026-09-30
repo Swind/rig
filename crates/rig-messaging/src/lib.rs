@@ -19,6 +19,7 @@ mod egress;
 pub mod format;
 pub mod gate;
 pub mod markdown;
+pub mod reactions;
 pub mod router;
 pub mod types;
 

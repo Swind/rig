@@ -43,3 +43,19 @@ the original text without adding wrappers.
 
 Run the [stdio harness](../../examples/messaging_stdio) to exercise routing without
 a platform bot token. Its mock-agent test runs without provider credentials.
+
+## Status reactions
+
+Each run has a controller and a `ReactionHook`, attached with `add_hook`. Hooks
+observe completion and tool dispatch in real time. They enqueue updates without
+awaiting a platform API. One worker serializes reaction operations, adds the new
+status before removing the old one, and applies only the last pending state after
+the debounce window. Text deltas reset stalled-progress timers at most once per
+second. This text-progress reset extends OpenAB's controller behavior.
+
+Done and error reflect final delivery and persistence outcomes. Success adds a
+random mood emoji. Reaction API failures are logged at debug level and do not
+fail the reply. `ChatConfig::reactions.remove_after_reply` defaults to false;
+when enabled, cleanup removes status and mood after the configured hold without
+holding the conversation lock. Adapters without reactions skip the worker and
+retention delay entirely.

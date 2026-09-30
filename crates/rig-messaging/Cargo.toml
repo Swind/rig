@@ -23,8 +23,9 @@ regex.workspace = true
 
 rig-agent = { path = "../rig-agent", version = "0.42.0", default-features = false }
 futures.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tracing.workspace = true
+fastrand.workspace = true
 
 [dev-dependencies]
 rig-core = { path = "../rig-core", version = "0.42.0", default-features = false, features = ["test-utils"] }
