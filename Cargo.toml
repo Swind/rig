@@ -216,6 +216,10 @@ edition = "2024"
 rust-version = "1.95.0"
 
 [workspace.dependencies]
+regex = "1"
+unicode-width = "0.2"
+pulldown-cmark = "0.13"
+unicode-segmentation = "1"
 # Every requirement below is a FLOOR, not a pin: `tokio = "1"` means `^1`,
 # and a downstream resolves anywhere inside that range — usually to whatever
 # its own lockfile already holds. So each floor is the lowest version rig's

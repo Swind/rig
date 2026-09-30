@@ -337,6 +337,10 @@ Copy from OpenAB. Allowed changes only:
 - Add the copyright notice and attribution.
 - Remove configuration deserialization from `TableMode`; no serde config API in this version.
 - Keep every original behavior test. Preserve helper behavior while making lint fixes.
+- Correct the verified small-limit fence overflow: when a fence wrapper cannot fit,
+  split the original text without adding fence wrappers. Test limits 1 through 15.
+  This fallback preserves the hard message limit; balanced fences are guaranteed
+  only when their wrapper can fit.
 - Dependencies: `unicode-segmentation`, `pulldown-cmark`, `unicode-width`. Prefer entries already in the root `[workspace.dependencies]`; add new ones only if absent.
 
 ## 6. Reactions

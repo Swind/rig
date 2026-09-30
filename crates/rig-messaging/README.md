@@ -10,3 +10,6 @@ Use the companion directly or enable the facade's `messaging` feature and import
 Message references retain the original channel for reactions. `reply_channel`
 selects the destination and conversation identity. Session keys encode all four
 routing fields with lengths so platform identifiers cannot collide.
+
+Message splitting and markdown table rendering are adapted from OpenAB
+(Copyright (c) 2026 openabdev), under the MIT license in [LICENSE.OpenAB](LICENSE.OpenAB).

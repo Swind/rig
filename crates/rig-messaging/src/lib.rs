@@ -15,6 +15,8 @@
 //! ```
 
 pub mod adapter;
+pub mod format;
+pub mod markdown;
 pub mod types;
 
 pub use adapter::{ChatAdapter, ChatError};
