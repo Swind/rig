@@ -482,7 +482,7 @@ format, test layout, facade compilation and platform dependency inspection.
 
 Purpose: run the whole pipeline (Inbound, Gate, lock, rig, egress) in a terminal with no bot token, and prove the degraded path for a platform that cannot edit or react. It is a development harness, not a supported product.
 
-Create `examples/messaging_stdio` as a workspace member (the root `members` already includes `examples/*`). It depends on `rig-messaging`, `rig-agent`, `rig-core` for conversation memory, a provider crate already used by other examples, and `tokio`. Take the model from the environment the way other rig examples do (for example `OpenAI::from_env()`).
+Create `examples/messaging_stdio` as a workspace member (the root `members` already includes `examples/*`). It depends on `rig-messaging`, `rig-agent`, `rig-core` with its existing OpenAI provider, reqwest and rustls features, and `tokio`. Take the model from the environment the way other rig examples do (for example `OpenAI::from_env()`).
 
 `ChatAdapter` implementation:
 

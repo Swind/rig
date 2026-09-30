@@ -1,0 +1,17 @@
+[package]
+name = "messaging_stdio"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rig-messaging.workspace = true
+rig-agent = { path = "../../crates/rig-agent", default-features = false }
+rig-core = { path = "../../crates/rig-core", default-features = false, features = ["reqwest", "rustls"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std", "io-util"] }
+
+[dev-dependencies]
+rig-core = { path = "../../crates/rig-core", default-features = false, features = ["test-utils"] }

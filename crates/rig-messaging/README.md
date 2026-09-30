@@ -40,3 +40,6 @@ error without retrying the append. Preview failures recovered by final delivery
 return success. Undelivered chunks and undeleted stale placeholders return errors.
 Fences are reopened across chunks when their overhead fits; smaller limits split
 the original text without adding wrappers.
+
+Run the [stdio harness](../../examples/messaging_stdio) to exercise routing without
+a platform bot token. Its mock-agent test runs without provider credentials.
