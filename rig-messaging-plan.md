@@ -111,12 +111,14 @@ crates/rig-messaging/                 # new companion crate, platform-neutral, n
   src/<module>/tests.rs          # sibling test files, per rig rules
 examples/messaging_stdio/             # workspace member, terminal reference adapter (Phase 2b)
 examples/messaging_discord/           # its own workspace (mirror examples/discord_bot), serenity adapter
+examples/messaging_slack/             # workspace member, existing HTTP/WebSocket transports
 ```
 
 - The crate name `rig-messaging` is decided (see section 1).
 - The core crate's `Cargo.toml` must not depend on serenity, Slack SDKs, or any platform library. Check with `cargo tree -p rig-messaging`.
 - Per rig `AGENTS.md` ("Repository Shape"), adding a companion crate means updating the root `Cargo.toml` dependency, feature, facade re-export, `default-members` (if applicable), README, crate docs, and examples. Check each; do not skip any.
-- Decide the Slack adapter location in Phase 5 (inside the workspace using `rig-tungstenite` and `rig-reqwest`, or its own workspace).
+- The Slack example is a workspace member using `rig-tungstenite` and the
+  reqwest client re-exported by `rig-reqwest`. It needs no additional Slack SDK.
 - This crate targets native platforms only. Look at how an existing native-only crate (for example `rig-bedrock`) declares that and do the same. Say so in the crate docs.
 
 ### rig rules that apply
@@ -423,8 +425,8 @@ Requirements:
 
 ## 8. Phases and acceptance
 
-Each phase is independently verifiable. Finish one before starting the next.
-Commit each phase after its focused checks pass. Stage only files belonging to
+Finish each phase's implementation and focused offline checks before starting
+the next. Commit each phase after those checks pass. Stage only files belonging to
 this implementation. Do not push or open a PR. Live acceptance requires platform
 credentials; record missing live evidence explicitly, and continue offline work.
 
@@ -436,7 +438,7 @@ credentials; record missing live evidence explicitly, and continue offline work.
 | 2b | Add stdio adapter, ordered stdin handling and memory; verify degraded capabilities offline | Runnable terminal harness |
 | 3 | Implement reaction controller and per-run hook; debounce/stall/concurrency tests | Status reactions and hook integration |
 | 4 | Add isolated Discord package, ingress checks, threads, attachments and HTTP egress; offline tests and separate build | Discord integration |
-| 5 | Inspect Slack reference; choose adapter location; implement Socket Mode normalization and adapter; offline tests and build | Slack integration |
+| 5 | Inspect Slack reference; reuse existing transports; implement Socket Mode normalization and adapter; offline tests and build | Slack integration |
 
 The phase tests are the acceptance criteria below. Integration examples document
 credentials and live commands. Final verification includes package tests, lint,
@@ -461,7 +463,8 @@ format, test layout, facade compilation and platform dependency inspection.
   - Two concurrent messages in one session: the second turn's history contains the complete first turn.
   - Streaming: the placeholder is sent once, edits respect the throttle, and the final text replaces the placeholder.
   - `ModelTurnRetried` clears the buffer.
-  - Over-limit text is split and code fences are balanced in every chunk.
+  - Over-limit text is split. Code fences are balanced when their wrappers fit;
+    limits 1 through 15 must always satisfy the hard character bound.
   - Empty final text produces an explanation.
   - A stream `Err` sends `⚠️` and returns `Err`.
   - The lock table holds no entry after the last handler, on success and error;
@@ -542,10 +545,28 @@ Phase 3 must re-run this example: with `supports_reactions() == false` the react
   call and record the reaction sequence on the original triggering message.
   Confirm rejected input creates no thread and downloads no attachments.
 
-### Phase 5: Slack adapter (decide separately)
+### Phase 5: Slack adapter
 
 - Use Socket Mode. Slack differs from Discord in message limit and tables (OpenAB `slack.rs` sends Block Kit `markdown` blocks with a limit near 11,900 characters and `renders_native_tables` = true).
-- Acceptance: adding Slack **requires no change** to `router.rs` or `egress.rs`. If it does, the `ChatAdapter` abstraction leaked; fix the interface first.
+- Use `examples/messaging_slack` as a workspace member. Normalize workspace,
+  channel and original timestamp separately from the reply thread. Keep DMs
+  unthreaded unless the original input already has `thread_ts`.
+- Apply Gate before authenticated file downloads. Bound total attachments to
+  10 MiB using metadata, response headers and streamed bytes. Download only from
+  HTTPS Slack hosts. Unsupported or unavailable files become text notes.
+- Acknowledge every envelope before spawning a turn. Handle ping/pong,
+  disconnect and reconnection with timeouts. Suppress the last 1,024 original
+  message identities across reconnects; process restarts clear this cache.
+- Use Block Kit markdown and a text accessibility fallback. Retry text-only
+  only for `invalid_blocks` or `msg_blocks_too_long`, not unrelated API errors.
+- Offline acceptance covers all outbound operations, ACKs with a blocked turn,
+  duplicate events, original reaction targets, rejected input, attachment bounds,
+  shared history, native tables and Unicode splitting through the router.
+- Live acceptance covers channel mentions, thread follow-ups, DMs, long replies,
+  tables, attachments, reactions and reconnection. Document required tokens,
+  scopes and event subscriptions in the example README.
+- Adding Slack requires no change to `router.rs` or `egress.rs`. If it does,
+  review the platform abstraction before changing the core.
 
 ## 9. Verification commands
 
@@ -567,7 +588,15 @@ cargo build -p messaging_stdio
 `examples/messaging_discord` is its own workspace; build it separately:
 
 ```bash
-cargo build --manifest-path examples/messaging_discord/Cargo.toml
+cargo build --locked --manifest-path examples/messaging_discord/Cargo.toml
+```
+
+Slack is a workspace member:
+
+```bash
+cargo nextest run --locked --profile local -p messaging_slack
+cargo clippy --locked -p messaging_slack --all-targets
+cargo build --locked -p messaging_slack
 ```
 
 Do not run `--all-features` across the whole workspace; that belongs to CI. For documentation-only changes, do a diff and link review only.
@@ -585,8 +614,7 @@ Implementation defaults:
 - `remove_after_reply` defaults to false, preserving OpenAB's behavior.
 - Adopt the `on_text_delta` stall reset from section 6.2 and document the deviation.
 
-The Slack adapter location remains open for Phase 5: inside the workspace or
-its own workspace.
+The Slack adapter is a workspace example using the existing Rig transports.
 
 ## 11. Open risks (report these; do not expand scope on your own)
 

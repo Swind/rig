@@ -45,6 +45,8 @@ Run the [stdio harness](../../examples/messaging_stdio) to exercise routing with
 a platform bot token. Its mock-agent test runs without provider credentials.
 The [Discord example](../../examples/messaging_discord) provides guild threads,
 DMs and bounded attachment downloads in an isolated workspace.
+The [Slack example](../../examples/messaging_slack) uses Socket Mode, native
+markdown tables and the existing Rig transports.
 
 ## Status reactions
 

@@ -1,0 +1,24 @@
+[package]
+name = "messaging_slack"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rig-messaging.workspace = true
+rig-agent = { path = "../../crates/rig-agent", default-features = false }
+rig-core = { path = "../../crates/rig-core", default-features = false, features = ["reqwest", "rustls"] }
+rig-http = { path = "../../crates/rig-http", features = ["websocket"] }
+rig-reqwest.workspace = true
+rig-tungstenite = { path = "../../crates/rig-tungstenite" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[dev-dependencies]
+futures.workspace = true
+rig-core = { path = "../../crates/rig-core", default-features = false, features = ["test-utils"] }
+tokio = { workspace = true, features = ["net", "io-util", "test-util"] }
