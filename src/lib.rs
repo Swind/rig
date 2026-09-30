@@ -265,3 +265,8 @@ companion_modules! {
     vectorize = rig_vectorize ["vectorize"];
     vertexai = rig_vertexai ["vertexai"];
 }
+
+/// Native messaging platform transports and conversation routing.
+#[cfg(all(feature = "messaging", not(target_family = "wasm")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "messaging")))]
+pub use rig_messaging as messaging;

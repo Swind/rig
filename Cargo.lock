@@ -10393,6 +10393,7 @@ dependencies = [
  "rig-helixdb",
  "rig-lancedb",
  "rig-memory",
+ "rig-messaging",
  "rig-milvus",
  "rig-mongodb",
  "rig-neo4j",
@@ -10735,6 +10736,15 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rig-messaging"
+version = "0.42.0"
+dependencies = [
+ "bytes",
+ "rig-core",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

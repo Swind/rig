@@ -138,6 +138,7 @@ default-members = [
     "crates/rig-core",
     "crates/rig-cassette",
     "crates/rig-agent",
+    "crates/rig-messaging",
     "crates/rig-ecs",
     "crates/rig-http",
     "crates/rig-reqwest",
@@ -235,6 +236,7 @@ rust-version = "1.95.0"
 # `rig.workspace = true` (add per-example features at the use site).
 rig = { path = ".", version = "0.42.0" }
 rig-agent = { path = "crates/rig-agent", version = "0.42.0" }
+rig-messaging = { path = "crates/rig-messaging", version = "0.42.0" }
 rig-reqwest = { path = "crates/rig-reqwest", version = "0.42.0" }
 rig-rmcp = { path = "crates/rig-rmcp", version = "0.42.0" }
 rig-core = { path = "crates/rig-core", version = "0.42.0" }
@@ -417,6 +419,7 @@ rig-vertexai = { path = "crates/rig-vertexai", version = "0.42.0", optional = tr
 # here would let `--no-default-features --features websocket` compile a
 # TLS-less backend that fails every handshake at runtime.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+rig-messaging = { path = "crates/rig-messaging", version = "0.42.0", optional = true }
 rig-tungstenite = { path = "crates/rig-tungstenite", version = "0.42.0", optional = true }
 
 [dev-dependencies]
@@ -468,6 +471,7 @@ tracing-opentelemetry = { workspace = true }
 typesafeai = ["dep:rig-typesafeai"]
 default = ["rig-core/default", "reqwest", "agent", "derive", "rustls"]
 agent = ["dep:rig-agent", "rig-cassette?/agent"]
+messaging = ["dep:rig-messaging", "agent"]
 # `rig::cassette`: effect-log recording and replay. With `agent`, also the
 # classic-agent adapter (`rig::cassette::agent`).
 cassette = ["dep:rig-cassette"]

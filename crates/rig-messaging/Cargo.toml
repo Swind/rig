@@ -1,0 +1,17 @@
+[package]
+name = "rig-messaging"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+readme = "README.md"
+description = "Messaging platform transports and conversation routing for Rig agents."
+repository = "https://github.com/0xPlaygrounds/rig"
+
+[lints]
+workspace = true
+
+[dependencies]
+rig-core = { path = "../rig-core", version = "0.42.0", default-features = false }
+bytes.workspace = true
+thiserror.workspace = true
