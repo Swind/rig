@@ -223,7 +223,7 @@ message metadata. A newly created reply thread does not change `m.is_thread`.
 pub struct ChatRouter { agent: Agent, gate: Gate, locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>, cfg: ChatConfig }
 impl ChatRouter {
     pub fn allows(&self, m: &Inbound, bot_user_id: &str) -> bool;
-    pub async fn handle(&self, adapter: Arc<dyn ChatAdapter>, m: Inbound, bot_user_id: &str);
+    pub async fn handle(&self, adapter: Arc<dyn ChatAdapter>, m: Inbound, bot_user_id: &str) -> Result<(), ChatError>;
 }
 ```
 
@@ -232,14 +232,18 @@ Construction requires an `Agent` configured with `.memory(...)` or
 install a memory backend. State this caller invariant in the router docs and
 configure memory in every example and history test.
 
-`ChatConfig` contains the egress `table_mode` and, from Phase 3, `ReactionConfig`.
+`ChatConfig` contains the egress `table_mode`, `attachment_mime_types`, and,
+from Phase 3, `ReactionConfig`. The MIME allowlist defaults to empty; callers
+explicitly enable formats their model supports for both bytes and URLs. Unknown
+or disabled MIME types become a short attachment-unavailable text note. Rig's
+Agent exposes no universal provider input-media capability contract to query.
 Keep the edit interval and failure threshold fixed as specified in section 5.5.
 Gate is supplied separately. The router preserves the Agent's model-call budget;
 tool examples and tests configure `.default_max_turns(3)` explicitly.
 
 `handle` flow:
 
-1. `self.allows(&m, bot_user_id)` delegates to `gate.allows`; on failure return silently. Validate the adapter message limit before constructing a stream; log invalid configuration and return.
+1. `self.allows(&m, bot_user_id)` delegates to `gate.allows`; on failure return silently. Validate the adapter message limit before constructing a stream; return a typed error for invalid configuration.
 2. Create `StatusReactions` (section 6) and call `set_queued()`. This happens **before** acquiring the lock, so queued messages show 👀 while they wait.
 3. Acquire the lock for this `session_key` and hold it until the turn ends. **Do not skip this.** rig loads history before the turn and appends after it, so concurrent turns on one `conversation_id` read stale history and interleave writes.
    - Lookup and cloning the per-key `Arc` happen under the table mutex. Release
@@ -264,7 +268,7 @@ tool examples and tests configure `.default_max_turns(3)` explicitly.
    is true, wait `done_hold_ms` or `error_hold_ms` and `clear()`. The reaction
    hold must not delay the next conversation turn.
 
-Run `handle` with `tokio::spawn` from the adapter's event callback so the platform event loop never blocks.
+Run `handle` with `tokio::spawn` from the adapter's event callback so the platform event loop never blocks. Log any returned error in that task.
 
 ### 5.5 `egress.rs`
 

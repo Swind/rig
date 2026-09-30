@@ -10760,10 +10760,15 @@ name = "rig-messaging"
 version = "0.42.0"
 dependencies = [
  "bytes",
+ "futures",
  "pulldown-cmark",
  "regex",
+ "rig-agent",
  "rig-core",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "unicode-segmentation",
  "unicode-width",
 ]

@@ -13,3 +13,30 @@ routing fields with lengths so platform identifiers cannot collide.
 
 Message splitting and markdown table rendering are adapted from OpenAB
 (Copyright (c) 2026 openabdev), under the MIT license in [LICENSE.OpenAB](LICENSE.OpenAB).
+
+## Routing
+
+Construct `ChatRouter` with an Agent configured with `.memory(...)` or
+`.memory_handler(...)`. Use one router for all ingress sharing the same Agent
+and history backend. A lock serializes each conversation through final delivery;
+independent conversations can run concurrently. Spawned handlers run in lock
+acquisition order. The router reclaims locks after normal success and failure.
+Task abortion can bypass cleanup; there is no cancellation API.
+
+Gate checks original message metadata. Apply `router.allows` before creating
+threads or downloading attachments, then call `handle` with the bot's platform
+user id. Channel allowlists match exact original channel ids, including threads.
+Rejected inputs produce no model or outbound calls.
+
+Set `ChatConfig::attachment_mime_types` to formats the model accepts for both
+bytes and URLs. The default set is empty. Supported image, document, audio and
+video MIME types become Rig user content. Other attachments become a short text
+note. Ingress owns downloads and size limits.
+
+Egress consumes the stream through its terminal item even when preview operations
+fail. It uses the final response as authoritative and sends every reply chunk.
+Failed history persistence delivers the answer with a warning and returns an
+error without retrying the append. Preview failures recovered by final delivery
+return success. Undelivered chunks and undeleted stale placeholders return errors.
+Fences are reopened across chunks when their overhead fits; smaller limits split
+the original text without adding wrappers.

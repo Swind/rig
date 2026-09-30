@@ -25,6 +25,18 @@ pub enum ChatError {
     /// The adapter advertises an invalid message limit.
     #[error("message limit must be positive")]
     InvalidMessageLimit,
+    /// The agent stream failed.
+    #[error("{0}")]
+    Stream(#[from] rig_agent::agent::StreamingError),
+    /// The stream ended without a terminal item.
+    #[error("agent stream ended without a final response")]
+    UnexpectedEnd,
+    /// The memory backend did not acknowledge persistence.
+    #[error("history persistence was not acknowledged: {0}")]
+    MemoryAppend(rig_core::error::ErrorReport),
+    /// The Agent had no conversation-memory append outcome.
+    #[error("agent must have conversation memory configured")]
+    MissingMemory,
 }
 
 /// Outbound operations. Message limits count Unicode scalar values and must be positive.

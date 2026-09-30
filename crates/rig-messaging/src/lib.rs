@@ -15,9 +15,17 @@
 //! ```
 
 pub mod adapter;
+mod egress;
 pub mod format;
+pub mod gate;
 pub mod markdown;
+pub mod router;
 pub mod types;
 
 pub use adapter::{ChatAdapter, ChatError};
+pub use gate::Gate;
+pub use router::{ChatConfig, ChatRouter};
+
+#[cfg(test)]
+mod test_support;
 pub use types::{Attachment, AttachmentSource, ChannelRef, Inbound, MessageRef, Sender};
