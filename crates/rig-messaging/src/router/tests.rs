@@ -336,3 +336,118 @@ fn attachment_conversion_supports_each_media_kind_and_source() {
         }
     }
 }
+
+struct HoldEachDelta {
+    entered: Arc<[Notify; 3]>,
+    release: Arc<[Notify; 3]>,
+    next: std::sync::atomic::AtomicUsize,
+}
+impl AgentHook for HoldEachDelta {
+    async fn on_text_delta(&self, _: &HookContext, _: TextDelta<'_>) -> ObservationAction {
+        let index = self.next.fetch_add(1, Ordering::SeqCst);
+        if let (Some(entered), Some(release)) = (self.entered.get(index), self.release.get(index)) {
+            entered.notify_one();
+            release.notified().await;
+        }
+        ObservationAction::Continue
+    }
+}
+
+#[tokio::test]
+async fn arrival_during_cleanup_keeps_the_waiting_turns_lock()
+-> Result<(), Box<dyn std::error::Error>> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let model = MockCompletionModel::from_stream_turns([
+            text_turn("first answer"),
+            text_turn("second answer"),
+            text_turn("third answer"),
+        ]);
+        let entered = Arc::new(std::array::from_fn(|_| Notify::new()));
+        let release = Arc::new(std::array::from_fn(|_| Notify::new()));
+        let agent = AgentBuilder::new(model.clone())
+            .memory(InMemoryConversationMemory::new())
+            .add_hook(HoldEachDelta {
+                entered: entered.clone(),
+                release: release.clone(),
+                next: std::sync::atomic::AtomicUsize::new(0),
+            })
+            .build();
+        let mut cfg = ChatConfig::default();
+        cfg.reactions.enabled = false;
+        let router = Arc::new(ChatRouter::new(agent, Gate::default(), cfg));
+        let adapter = Arc::new(FakeAdapter::default());
+        let spawn = |text: &'static str| {
+            let router = router.clone();
+            let adapter = adapter.clone();
+            tokio::spawn(async move { router.handle(adapter, inbound(text), "bot").await })
+        };
+        let key = inbound("first").reply_channel.session_key();
+        let first = spawn("first");
+        entered[0].notified().await;
+        let original = Arc::downgrade(
+            router
+                .locks
+                .lock()
+                .await
+                .get(&key)
+                .ok_or("missing first lock")?,
+        );
+        let second = spawn("second");
+        loop {
+            let locks = router.locks.lock().await;
+            if locks
+                .get(&key)
+                .is_some_and(|lock| Arc::strong_count(lock) == 3)
+            {
+                break;
+            }
+            drop(locks);
+            tokio::task::yield_now().await;
+        }
+        // Block cleanup while the first guard is released and the second turn starts.
+        let table = router.locks.lock().await;
+        release[0].notify_one();
+        entered[1].notified().await;
+        assert!(!first.is_finished());
+        let third = spawn("third");
+        tokio::task::yield_now().await;
+        assert_eq!(model.request_count(), 2);
+        drop(table);
+        first.await??;
+        loop {
+            let locks = router.locks.lock().await;
+            if locks
+                .get(&key)
+                .is_some_and(|lock| Arc::strong_count(lock) == 3)
+            {
+                assert!(std::sync::Weak::ptr_eq(
+                    &original,
+                    &Arc::downgrade(locks.get(&key).ok_or("missing active lock")?),
+                ));
+                break;
+            }
+            drop(locks);
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(model.request_count(), 2);
+        release[1].notify_one();
+        entered[2].notified().await;
+        release[2].notify_one();
+        second.await??;
+        third.await??;
+        let requests = model.requests();
+        assert!(
+            requests[2]
+                .chat_history
+                .contains(&Message::assistant("first answer"))
+        );
+        assert!(
+            requests[2]
+                .chat_history
+                .contains(&Message::assistant("second answer"))
+        );
+        assert!(router.locks.lock().await.is_empty());
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })
+    .await?
+}

@@ -386,3 +386,77 @@ async fn reaction_hold_releases_conversation_lock() -> Result<(), Box<dyn std::e
     second.await??;
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_router_runs_keep_reaction_hooks_and_terminal_states_separate()
+-> Result<(), Box<dyn std::error::Error>> {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let finish = Arc::new(tokio::sync::Notify::new());
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::tool_call("tc1", "controlled", serde_json::json!({})),
+            MockStreamEvent::final_response(Default::default()),
+        ],
+        text_turn("second answer"),
+        text_turn("first answer"),
+    ]);
+    let agent = AgentBuilder::new(model)
+        .tool(rig_agent::test_utils::MockControlledTool::new(
+            started.clone(),
+            finish.clone(),
+        ))
+        .default_max_turns(3)
+        .memory(InMemoryConversationMemory::new())
+        .build();
+    let router = Arc::new(ChatRouter::new(
+        agent,
+        Gate::default(),
+        ChatConfig::default(),
+    ));
+    let adapter = fake_adapter();
+    let first_input = inbound("first");
+    let mut second_input = inbound("second");
+    second_input.message.channel.channel_id = "other".into();
+    second_input.reply_channel = second_input.message.channel.clone();
+    let first_message = first_input.message.clone();
+    let second_message = second_input.message.clone();
+    let first = tokio::spawn({
+        let router = router.clone();
+        let adapter = adapter.clone();
+        async move { router.handle(adapter, first_input, "bot").await }
+    });
+    started.notified().await;
+    advance(700).await;
+    assert!(
+        adapter
+            .calls()
+            .contains(&Call::Add(first_message.clone(), "🔥".into()))
+    );
+    router.handle(adapter.clone(), second_input, "bot").await?;
+    assert!(!first.is_finished());
+    assert!(
+        adapter
+            .calls()
+            .contains(&Call::Add(second_message.clone(), "🆗".into()))
+    );
+    assert!(
+        !adapter
+            .calls()
+            .contains(&Call::Add(first_message.clone(), "🆗".into()))
+    );
+    let second_reactions = || {
+        adapter.calls().into_iter().filter(|call| {
+            matches!(call, Call::Add(message, _) | Call::Remove(message, _) if message == &second_message)
+        }).collect::<Vec<_>>()
+    };
+    let completed_second = second_reactions();
+    finish.notify_one();
+    first.await??;
+    assert!(
+        adapter
+            .calls()
+            .contains(&Call::Add(first_message, "🆗".into()))
+    );
+    assert_eq!(second_reactions(), completed_second);
+    Ok(())
+}
