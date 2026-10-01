@@ -380,8 +380,13 @@ impl Handler {
                 }
             }
         }
-        self.router
-            .handle(self.adapter.clone(), input, &self.identity.bot)
+        let session = input.reply_channel.session_key();
+        crate::provider::SESSION
+            .scope(
+                session,
+                self.router
+                    .handle(self.adapter.clone(), input, &self.identity.bot),
+            )
             .await
     }
     async fn socket(

@@ -7764,6 +7764,7 @@ dependencies = [
 name = "messaging_slack"
 version = "0.42.0"
 dependencies = [
+ "dotenvy",
  "futures",
  "rig-agent",
  "rig-core",

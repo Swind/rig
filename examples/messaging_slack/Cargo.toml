@@ -8,6 +8,7 @@ publish = false
 workspace = true
 
 [dependencies]
+dotenvy.workspace = true
 rig-messaging.workspace = true
 rig-agent = { path = "../../crates/rig-agent", default-features = false }
 rig-core = { path = "../../crates/rig-core", default-features = false, features = ["reqwest", "rustls"] }
