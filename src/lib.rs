@@ -261,7 +261,6 @@ companion_modules! {
     s3vectors = rig_s3vectors ["s3vectors"];
     scylladb = rig_scylladb ["scylladb"];
     sqlite = rig_sqlite ["sqlite"];
-    surrealdb = rig_surrealdb ["surrealdb"];
     vectorize = rig_vectorize ["vectorize"];
     vertexai = rig_vertexai ["vertexai"];
 }

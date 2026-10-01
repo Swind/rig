@@ -39,7 +39,6 @@ all_root = [
     "rig/s3vectors",
     "rig/scylladb",
     "rig/sqlite",
-    "rig/surrealdb",
     "rig/vectorize",
     "rig/vertexai",
     "rig/audio",

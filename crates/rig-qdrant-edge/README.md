@@ -33,9 +33,10 @@ opening the same directory concurrently can corrupt its storage.
 Qdrant Edge operations are synchronous. The adapter runs storage, query,
 flush, and optimization calls on Tokio's blocking pool. Call `flush` after an
 ingestion batch when the application needs an explicit persistence boundary;
-Qdrant Edge 0.6.1 exposes flush as an infallible method that panics if its
-underlying I/O fails. Dropping the last store clone also flushes synchronously
-and can panic on I/O failure, so drop it where blocking is acceptable.
+Qdrant Edge 0.8.0 reports flush I/O failures through the adapter's datastore
+error. Dropping the last store clone also flushes synchronously and logs I/O
+failures, so drop it where blocking is acceptable. Use explicit `flush` when
+the application needs to handle persistence errors.
 
 This backend is native-only. Qdrant Edge is distributed under Apache-2.0; Rig's
 adapter is distributed under MIT.

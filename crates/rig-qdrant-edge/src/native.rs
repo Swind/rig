@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 /// The named vector must already exist with the configured dimension and Cosine distance when
 /// opening an existing shard. Constructors and operations that access the shard require a Tokio
 /// runtime. Edge operations run on its blocking pool. Dropping the last clone synchronously flushes
-/// the shard through Qdrant Edge's `Drop` implementation and can panic on I/O failure.
+/// the shard through Qdrant Edge's `Drop` implementation, which logs flush failures.
 /// Callers must keep only one independently opened store per directory across all processes;
 /// use clones to share it. The backend does not enforce exclusive directory ownership.
 #[derive(Clone)]
@@ -122,13 +122,12 @@ impl QdrantEdgeVectorStore {
 
     /// Flushes the shard on Tokio's blocking pool.
     ///
-    /// Qdrant Edge 0.6.1 exposes a synchronous, infallible `flush` method that panics on an
-    /// underlying flush failure. This method reports blocking-task failures; it cannot recover
-    /// backend I/O errors hidden by that API.
+    /// Returns a datastore error if persistence or the blocking task fails.
     pub async fn flush(&self) -> Result<(), VectorStoreError> {
         let shard = Arc::clone(&self.shard);
         tokio::task::spawn_blocking(move || shard.flush())
             .await
+            .map_err(VectorStoreError::datastore)?
             .map_err(VectorStoreError::datastore)
     }
 
@@ -174,9 +173,7 @@ impl QdrantEdgeVectorStore {
                         "score threshold must be finite and representable as f32".to_owned(),
                     ));
                 }
-                Ok(qdrant_edge::external::ordered_float::OrderedFloat(
-                    threshold_f32,
-                ))
+                Ok(threshold_f32)
             })
             .transpose()?;
 

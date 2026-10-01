@@ -61,12 +61,12 @@ facade's WASM all-features build remains available.
 
 Before implementing the adapter:
 
-1. Pin `qdrant-edge = "=0.6.1"` in the workspace dependency table and use it
-   from the crate manifest. This version passes the stable compiler probe and
-   shares `geo` 0.32 with SurrealDB. Version 0.7.2 conflicts with the workspace
-   `i_overlay` resolution; 0.8.0 uses unstable `std::debug_assert_matches`.
-   Root verification confirms the selected dependency graph on Linux with Rust
-   1.95 before implementation is accepted.
+1. Pin `qdrant-edge = "=0.8.0"` in the workspace dependency table and use it
+   from the crate manifest. Rust 1.98.1 supports Edge's
+   `std::debug_assert_matches!` usage. The removed SurrealDB integration no
+   longer constrains the workspace's `geo` and `i_overlay` dependencies.
+   Verify the selected dependency graph on Linux with the pinned Rust 1.98.1
+   toolchain before accepting implementation changes.
 2. Document native-only support. The Edge crate uses filesystem, C++ SIMD, and
    process libraries and is exposed by Rig only on native targets.
 3. Check shard creation, loading, configuration inspection, updates, queries,
@@ -96,7 +96,7 @@ Application
 Each adapter instance searches its configured shard. Keep one shared shard handle
 per opened dataset rather than reopening a directory for every request. Open each
 directory only once across all processes and share the adapter through clones.
-Qdrant Edge 0.6.1 does not enforce exclusive directory ownership, so concurrent
+Qdrant Edge 0.8.0 does not enforce exclusive directory ownership, so concurrent
 independent opens are unsupported. Multiple users can share the conversation shard,
 with an application-enforced `user_id`
 filter. Knowledge topics can share the knowledge shard with `domain` or `source`
@@ -132,9 +132,10 @@ At startup:
    ingestion and queries. Equal dimensions alone do not establish compatibility.
 5. Construct the adapter using the opened shard and model.
 
-For `qdrant-edge` 0.6.1, `flush()` returns unit and can panic on lock or I/O
-failures. Run synchronous storage operations off the async executor; convert a
-panic from the blocking task into the datastore error. Verify successful writes
+For `qdrant-edge` 0.8.0, `flush()` returns a persistence error on I/O failure.
+Run synchronous storage operations off the async executor and map backend errors
+and blocking-task failures into datastore errors. Dropping the last shard handle
+flushes synchronously and logs persistence failures. Verify successful writes
 survive an explicit flush, release of all handles, and reopening the shard. This
 establishes only successful explicit-flush persistence, not crash durability or
 multi-process access. Changing embedding models requires re-embedding or a
@@ -214,7 +215,7 @@ or inserted chunk. See the
 
 **1.1 Lifecycle and schema.** Add create/open operations, shared shard
 ownership, schema validation, flush, reopening, and explicit optimization.
-Use only `qdrant-edge` 0.6.1 APIs and document native target support.
+Use only `qdrant-edge` 0.8.0 APIs and document native target support.
 
 **1.2 Insertion, filters, and search.** Implement `InsertDocuments` and both
 `VectorStoreIndex` methods. Preserve payload provenance, translate equality,
@@ -223,8 +224,8 @@ range, AND, and OR filters, validate inputs, and map errors to Rig's
 applicable.
 
 **1.3 Blocking work and errors.** Keep synchronous disk and indexing work off
-the async executor. Convert blocking-task panics, including 0.6.1 flush panics,
-into datastore errors. Add sibling-file unit tests where needed.
+the async executor. Convert backend errors and blocking-task failures into
+datastore errors. Add sibling-file unit tests where needed.
 
 ### Phase 2: add local tests and the example
 

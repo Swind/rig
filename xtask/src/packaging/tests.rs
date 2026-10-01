@@ -34,8 +34,8 @@ fn reported_lines_are_indented_under_their_package() {
 
 #[test]
 fn docs_rs_must_list_every_feature_but_the_exclusions() {
-    let features: BTreeSet<&str> = ["default", "agent", "surrealdb", "rmcp"].into();
-    let excluded: BTreeSet<&str> = ["surrealdb"].into();
+    let features: BTreeSet<&str> = ["default", "agent", "excluded_backend", "rmcp"].into();
+    let excluded: BTreeSet<&str> = ["excluded_backend"].into();
     let listed = |names: &[&str]| -> BTreeSet<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
     };
@@ -48,14 +48,14 @@ fn docs_rs_must_list_every_feature_but_the_exclusions() {
 
     let listed_excluded = docs_rs_gaps(
         &features,
-        &listed(&["agent", "rmcp", "surrealdb"]),
+        &listed(&["agent", "rmcp", "excluded_backend"]),
         false,
         &excluded,
     );
     assert!(
         listed_excluded
             .iter()
-            .any(|failure| failure.contains("surrealdb"))
+            .any(|failure| failure.contains("excluded_backend"))
     );
 
     let unknown = docs_rs_gaps(
@@ -73,6 +73,6 @@ fn docs_rs_must_list_every_feature_but_the_exclusions() {
 
 #[test]
 fn docs_rs_may_build_all_features_once_nothing_is_excluded() {
-    let features: BTreeSet<&str> = ["default", "agent", "surrealdb"].into();
+    let features: BTreeSet<&str> = ["default", "agent", "qdrant-edge"].into();
     assert!(docs_rs_gaps(&features, &BTreeSet::new(), true, &BTreeSet::new()).is_empty());
 }

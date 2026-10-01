@@ -55,7 +55,7 @@ See the [`/examples`](./examples) folder for usage examples.
 
 ## Notes
 
-- Uses application-level cosine similarity search (similar to SQLite and SurrealDB implementations)
+- Uses application-level cosine similarity search (similar to the SQLite implementation)
 - Suitable for small to medium datasets (< 100k vectors)
 - Provides ScyllaDB's operational benefits: high availability, horizontal scaling, low latency
 - Future-ready for ScyllaDB's native vector search capabilities 

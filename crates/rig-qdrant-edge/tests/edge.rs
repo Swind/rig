@@ -193,6 +193,32 @@ async fn schema_mismatches_and_create_on_existing_data_are_rejected() -> Result<
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn flush_reports_storage_failure_and_recovers() -> Result<()> {
+    let temp = assert_fs::TempDir::new()?;
+    let path = temp.path().join("knowledge");
+    let relocated = temp.path().join("relocated");
+    let index = indexed_chunks(&path, vec![chunk("one", "Qdrant database", "alice", 1)]).await?;
+    std::fs::rename(&path, &relocated)?;
+    std::fs::write(&path, b"block shard directory access")?;
+    let result = index.flush().await;
+    std::fs::remove_file(&path)?;
+    std::fs::rename(&relocated, &path)?;
+    ensure!(
+        matches!(
+            result,
+            Err(rig_core::vector_store::VectorStoreError::DatastoreError(_))
+        ),
+        "flush I/O failure should return a datastore error: {result:?}"
+    );
+    index.flush().await?;
+    drop(index);
+    let reopened = QdrantEdgeVectorStore::open(&path, local_embedding_model(), "dense", 3).await?;
+    ensure!(reopened.top_n_ids(request("database", 1)).await?.len() == 1);
+    Ok(())
+}
+
 #[tokio::test]
 async fn ranked_document_and_id_search_honor_limit_and_filters() -> Result<()> {
     let temp = assert_fs::TempDir::new()?;
@@ -440,7 +466,10 @@ async fn explicit_optimization_preserves_search_results() -> Result<()> {
     let path = temp.path().join("knowledge");
     std::fs::create_dir_all(&path)?;
     let mut config = edge_config(qdrant_edge::Distance::Cosine);
-    config.optimizers.indexing_threshold = Some(1);
+    config.optimizers = Some(qdrant_edge::EdgeOptimizersConfig {
+        indexing_threshold: Some(1),
+        ..Default::default()
+    });
     drop(qdrant_edge::EdgeShard::new(&path, config)?);
     let model = local_embedding_model();
     let index = QdrantEdgeVectorStore::open(&path, model.clone(), "dense", 3).await?;

@@ -45,10 +45,7 @@ const FACADE_ALLOWED_FILES: &[&str] = &[
 /// Facade features the docs.rs build leaves out, each with the reason. Every
 /// other feature except `default` must be in `[package.metadata.docs.rs]
 /// features`.
-const DOCS_RS_EXCLUDED: &[(&str, &str)] = &[(
-    "surrealdb",
-    "surrealdb's `diskann` dependency does not compile on the nightly docs.rs uses",
-)];
+const DOCS_RS_EXCLUDED: &[(&str, &str)] = &[];
 
 /// crates.io's documented hard cap, on the *compressed* tarball. Not the gate:
 /// the thing the gate exists to keep the workspace away from.
