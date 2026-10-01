@@ -663,6 +663,19 @@ must not weaken the universal assertions or silently mark the scenario passed.
 
 ## Integration Tests
 
+The `rig-qdrant-edge` unit and local-storage tests need no Docker daemon,
+Qdrant server, API key, or model download. The example uses local deterministic
+embeddings and a local shard directory; run it from a clean checkout to create
+and query the sample dataset.
+
+```bash
+cargo nextest run --locked --profile local -p rig-qdrant-edge
+cargo run --locked -p rig-qdrant-edge --example qdrant_edge_vector_search
+```
+
+The embedded backend is native-only. Its local persistence tests exercise
+explicit flush followed by closing and reopening the shard.
+
 External-service integration tests are collected under the `integrations` target and are gated by
 feature flags. Some start Docker containers through `testcontainers`, so Docker must be running;
 others are ignored because they need external credentials or pre-provisioned services. Check each

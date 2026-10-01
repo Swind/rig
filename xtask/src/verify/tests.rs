@@ -131,6 +131,11 @@ fn full_and_floor_lanes_select_independently() {
     for p in ["crates/rig-sqlite/src/lib.rs", "tests/integrations.rs"] {
         assert!(checks::full_lane(p) && !checks::floor_lane(p), "{p}");
     }
+    let edge = "crates/rig-qdrant-edge/src/lib.rs";
+    assert!(
+        checks::full_lane(edge) && !checks::floor_lane(edge),
+        "{edge}"
+    );
     for p in [
         "examples/agent/Cargo.toml",
         "rust-toolchain.toml",
@@ -238,6 +243,7 @@ fn pr_preserves_required_platform_and_default_guarantees() {
         "wasm-rig-ecs",
         "wasm-rig-ecs-run_wasm",
         "native-only-rig-rmcp",
+        "native-only-rig-qdrant-edge",
         "loom",
         "doctests",
         "conformance",
@@ -658,10 +664,10 @@ fn lanes_mode_reports_the_pr_plan_lanes() {
 
 #[test]
 fn full_lane_covers_every_integration_suite() {
-    // The service suites are the only runtime coverage the storage crates
-    // have; a suite whose crate is not a full-lane trigger merges its crate
-    // with none. bedrock's suite is feature-gated inside the facade, which
-    // the PR gate's `--features bedrock` sweep already runs.
+    // Service suites are the runtime coverage for external storage crates.
+    // rig-qdrant-edge owns its local integration suite in the companion crate,
+    // so its source also selects full-tests. bedrock's suite is feature-gated
+    // inside the facade, which the PR gate's `--features bedrock` sweep runs.
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut suites = BTreeSet::new();
     for entry in std::fs::read_dir(root.join("tests/integrations")).unwrap() {
@@ -684,9 +690,10 @@ fn full_lane_covers_every_integration_suite() {
             .into_owned();
         let source = format!("crates/{name}/src/lib.rs");
         let suite = name.strip_prefix("rig-").unwrap_or(&name);
+        let has_full_lane_tests = suites.contains(suite) || name == "rig-qdrant-edge";
         assert_eq!(
             checks::full_lane(&source),
-            suites.contains(suite),
+            has_full_lane_tests,
             "{name}: full-lane trigger and integration suite must agree"
         );
     }

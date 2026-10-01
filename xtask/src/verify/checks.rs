@@ -469,6 +469,10 @@ pub(super) fn all() -> Vec<Check> {
     for (package, message) in [
         ("rig-rmcp", "the `rmcp` feature is native-only"),
         (
+            "rig-qdrant-edge",
+            "rig-qdrant-edge is a native-only local storage backend",
+        ),
+        (
             "rig-tungstenite",
             "rig-tungstenite is a native websocket backend",
         ),
@@ -480,11 +484,8 @@ pub(super) fn all() -> Vec<Check> {
     }
     checks
 }
-/// Inputs whose change runs the full runtime lane (`full-tests`): the
-/// service-backed integration suites, the crates they cover, the facade
-/// feature-forwarding guard, and the shared build/verification inputs whose
-/// effect on those suites cannot be narrowed. CI's `slow.yaml` asks this
-/// planner (`verify --lanes`) rather than keeping its own path filter.
+/// Inputs that select `full-tests`: service-backed suites, rig-qdrant-edge's
+/// local suite, and shared inputs. CI's `slow.yaml` uses this planner directly.
 pub(super) fn full_lane(path: &str) -> bool {
     [
         "Cargo.toml",
@@ -509,6 +510,7 @@ pub(super) fn full_lane(path: &str) -> bool {
             "rig-neo4j",
             "rig-postgres",
             "rig-qdrant",
+            "rig-qdrant-edge",
             "rig-scylladb",
             "rig-sqlite",
             "rig-vectorize",

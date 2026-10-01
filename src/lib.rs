@@ -266,6 +266,14 @@ companion_modules! {
     vertexai = rig_vertexai ["vertexai"];
 }
 
+/// In-process vector storage using local Qdrant Edge shards. This integration
+/// supports native targets only.
+#[cfg(all(feature = "qdrant-edge", not(target_family = "wasm")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "qdrant-edge")))]
+pub mod qdrant_edge {
+    pub use rig_qdrant_edge::*;
+}
+
 /// Native messaging platform transports and conversation routing.
 #[cfg(all(feature = "messaging", not(target_family = "wasm")))]
 #[cfg_attr(docsrs, doc(cfg(feature = "messaging")))]

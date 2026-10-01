@@ -1,0 +1,29 @@
+[package]
+name = "rig-qdrant-edge"
+version.workspace = true
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = "MIT"
+readme = "README.md"
+description = "Rig vector store integration for embedded Qdrant Edge."
+repository = "https://github.com/0xPlaygrounds/rig"
+
+[lints]
+workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+qdrant-edge = { workspace = true }
+rig-core = { path = "../rig-core", version = "0.42.0", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+anyhow = { workspace = true }
+assert_fs = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[features]
+default = []
