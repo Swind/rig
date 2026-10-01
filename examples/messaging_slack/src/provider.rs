@@ -3,10 +3,15 @@
 //! Go requests carry the current conversation's session key through HTTP
 //! middleware. The endpoint selects the wire protocol.
 
-use rig_agent::{Agent, AgentBuilder};
+use rig_agent::{
+    Agent, AgentBuilder,
+    agent::{AgentHook, DispatchAction, DispatchEvent, HookContext},
+};
 use rig_core::{
     DynModel,
+    effect::EffectKind,
     memory::InMemoryConversationMemory,
+    model::models_dev::ModelsDev,
     operation::Completion,
     providers::{
         anthropic::AnthropicConfig,
@@ -18,7 +23,7 @@ use rig_http::http_client::{
     self, DynHttpClient, HeaderMap, HeaderValue, Method, Uri, middleware::HttpMiddleware,
 };
 use rig_reqwest::{ReqwestClient, reqwest};
-use std::time::Duration;
+use std::{sync::OnceLock, time::Duration};
 
 tokio::task_local! {
     pub(crate) static SESSION: String;
@@ -34,6 +39,57 @@ pub(crate) enum Error {
     Http(#[from] reqwest::Error),
     #[error("{0}")]
     Config(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ModelLimits {
+    context: Option<u64>,
+    output: Option<u64>,
+}
+
+impl ModelLimits {
+    fn budget(self, requested: u64, input_bytes: usize) -> Option<u64> {
+        let output = requested.min(self.output.unwrap_or(requested));
+        let remaining = self.context.map(|context| {
+            // ponytail: serialized UTF-8 bytes plus a margin estimate input cost;
+            // use a model tokenizer when precise context utilization is needed.
+            context.saturating_sub((input_bytes as u64).saturating_add(4096))
+        });
+        let output = output.min(remaining.unwrap_or(output));
+        (output > 0).then_some(output)
+    }
+}
+
+impl AgentHook for ModelLimits {
+    async fn on_dispatch(&self, _: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
+        let EffectKind::Completion { request, stream } = event.kind else {
+            return DispatchAction::proceed();
+        };
+        let input = match serde_json::to_vec(request) {
+            Ok(input) => input,
+            Err(_) => return DispatchAction::stop("could not estimate Go request size"),
+        };
+        let Some(tokens) = self.budget(request.max_tokens.unwrap_or(4096), input.len()) else {
+            return DispatchAction::stop("Go conversation exceeds the estimated context budget");
+        };
+        let mut request = request.clone();
+        request.max_tokens = Some(tokens);
+        DispatchAction::patch(EffectKind::Completion {
+            request,
+            stream: *stream,
+        })
+    }
+}
+
+fn model_catalog() -> Result<&'static ModelsDev, Error> {
+    static CATALOG: OnceLock<ModelsDev> = OnceLock::new();
+    if let Some(catalog) = CATALOG.get() {
+        return Ok(catalog);
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    Ok(CATALOG.get_or_init(|| ModelsDev::new(DynHttpClient::new(ReqwestClient::from(client)))))
 }
 
 struct SessionHeader;
@@ -123,16 +179,31 @@ fn go_model(
     })
 }
 
-pub(crate) fn agent_from_env() -> Result<(Agent, bool), Error> {
+pub(crate) async fn agent_from_env() -> Result<(Agent, bool), Error> {
+    let mut limits = ModelLimits::default();
     let (model, go): (DynModel<Completion>, bool) = match std::env::var("OPENCODE_GO_API_KEY") {
-        Ok(key) => (
-            go_model(
-                key,
-                std::env::var("OPENCODE_GO_MODEL")?,
-                &std::env::var("OPENCODE_GO_ENDPOINT")?,
-            )?,
-            true,
-        ),
+        Ok(key) => {
+            let id = std::env::var("OPENCODE_GO_MODEL")?;
+            let model = go_model(key, id.clone(), &std::env::var("OPENCODE_GO_ENDPOINT")?)?;
+            limits = match model_catalog()?.get("opencode-go", &id).await {
+                Ok(info) => ModelLimits {
+                    context: info
+                        .as_ref()
+                        .and_then(|info| info.context_length)
+                        .map(u64::from),
+                    output: info.and_then(|info| info.max_output_tokens).map(u64::from),
+                },
+                Err(_) => {
+                    eprintln!("Go model metadata unavailable; using configured output limit");
+                    ModelLimits::default()
+                }
+            };
+            eprintln!(
+                "Go model {id}: context={:?}, output={:?}",
+                limits.context, limits.output
+            );
+            (model, true)
+        }
         Err(std::env::VarError::NotPresent) => {
             let provider = OpenAI::from_env()?;
             let model =
@@ -153,7 +224,7 @@ pub(crate) fn agent_from_env() -> Result<(Agent, bool), Error> {
             Err(std::env::VarError::NotPresent) => 4096,
             Err(error) => return Err(error.into()),
         };
-        agent = agent.max_tokens(tokens);
+        agent = agent.max_tokens(tokens).add_hook(limits);
     }
     Ok((agent.build(), go))
 }

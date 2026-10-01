@@ -91,6 +91,10 @@ async fn all_go_protocols_stream_with_correct_auth_and_conversation_headers()
         let agent = AgentBuilder::new(go_model("offline-go-key".into(), "fixture".into(), &url)?)
             .memory(InMemoryConversationMemory::new())
             .max_tokens(4096)
+            .add_hook(ModelLimits {
+                context: Some(100_000),
+                output: Some(2048),
+            })
             .build();
         for session in ["conversation-one", "conversation-one", "conversation-two"] {
             let items = SESSION
@@ -137,8 +141,57 @@ async fn all_go_protocols_stream_with_correct_auth_and_conversation_headers()
                 body.get("model").and_then(serde_json::Value::as_str),
                 Some("fixture")
             );
+            let tokens = body
+                .get("max_tokens")
+                .or_else(|| body.get("max_output_tokens"));
+            assert_eq!(tokens.and_then(serde_json::Value::as_u64), Some(2048));
         }
     }
+    Ok(())
+}
+
+#[test]
+fn context_budget_handles_missing_and_exhausted_limits() {
+    let limits = ModelLimits {
+        context: Some(10000),
+        output: Some(8192),
+    };
+    assert_eq!(limits.budget(20000, 0), Some(5904));
+    assert_eq!(limits.budget(4096, 4000), Some(1904));
+    assert_eq!(limits.budget(4096, 5904), None);
+    assert_eq!(limits.budget(4096, usize::MAX), None);
+    assert_eq!(ModelLimits::default().budget(4096, usize::MAX), Some(4096));
+}
+
+#[tokio::test]
+#[ignore = "requires OpenCode Go credentials and consumes provider quota"]
+async fn live_go_streams_two_turns_with_conversation_history()
+-> Result<(), Box<dyn std::error::Error>> {
+    use futures::TryStreamExt;
+    use rig_agent::agent::MultiTurnStreamItem;
+    dotenvy::dotenv()?;
+    let (agent, go) = agent_from_env().await?;
+    assert!(go, "live Go validation requires OPENCODE_GO_API_KEY");
+    let session = format!("rig-messaging-provider-smoke-{}", std::process::id());
+    for prompt in [
+        "In Rust, what does Iterator::map do? Explain in at most 30 words.",
+        "Give one Rust code example for that method, in at most 30 words.",
+    ] {
+        let items = SESSION
+            .scope(session.clone(), async {
+                agent
+                    .prompt(prompt)
+                    .conversation(session.as_str())
+                    .stream()
+                    .try_collect::<Vec<_>>()
+                    .await
+            })
+            .await?;
+        assert!(items.iter().any(|item| matches!(item,
+            MultiTurnStreamItem::FinalResponse(response) if !response.output().trim().is_empty()
+        )));
+    }
+    eprintln!("Live Go validation passed: two streamed Rust assistance turns");
     Ok(())
 }
 

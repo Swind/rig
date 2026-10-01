@@ -45,6 +45,24 @@ including follow-ups and tool continuations. Go media formats are not enabled
 by default, so attachments become text notes. Enable formats in `ChatConfig`
 only after confirming the selected model accepts them.
 
+At startup, Go model limits are fetched from the `opencode-go` provider record
+in [models.dev](https://models.dev). Its `limit.context` and `limit.output`
+fields supply the context window and output cap. The fetch has a ten second
+timeout and a 16 MiB response limit. Missing or unavailable metadata leaves the
+configured output limit in place. This uses Rig's reusable
+`model::models_dev::ModelsDev::get(provider, model)` API and existing `ModelInfo`
+fields. The example shares one catalog for the process lifetime. Queries for
+other models reuse the same download. `ModelsDev` clones share their cache;
+`invalidate().await` clears it for the next fetch. The cache is in memory and
+does not survive a process restart. Failed fetches are retried on the next query.
+
+Each prepared model request, including history, instructions and tools, caps
+output to the model's output limit and estimated remaining context. Input is
+estimated using serialized UTF-8 bytes plus a 4096-token margin. This estimate
+can leave context unused and is not an exact tokenizer count. An exhausted
+estimate fails the turn without deleting history. No history compaction is
+performed.
+
 ## Conversation behavior
 
 A channel mention starts a reply thread. Follow-ups in threads and DMs need no
@@ -81,6 +99,43 @@ blocked-turn acknowledgements, rejected input, history, native tables and
 Unicode splitting. They need no platform or provider credentials. Provider tests cover all three
 Go wire protocols, authentication and conversation headers using local SSE
 fixtures. Actual Go credentials are required for live model validation.
+
+To validate two real streamed model turns with conversation history using the
+Go configuration in `.env`:
+
+```sh
+cargo test --locked -p messaging_slack live_go_streams -- --ignored --nocapture
+```
+
+### Real Slack tests
+
+Set `SLACK_TEST_CHANNEL` to a dedicated channel also listed in
+`SLACK_ALLOWED_CHANNELS`. Invite the bot and grant `reactions:read` in addition
+to the scopes above. The tests load `.env`, use actual credentials and send
+messages to that channel. Run them serially:
+
+```sh
+cargo test --locked -p messaging_slack live_slack -- --ignored --nocapture --test-threads=1
+```
+
+The lifecycle test sends, reads through `conversations.history`, edits, adds
+and reads reactions, removes reactions, creates and reads a thread through
+`conversations.replies`, then deletes its own messages. The Socket Mode test
+receives and acknowledges the actual posted message event and deletes its
+test message. It requires `message.channels` or `message.groups` for the chosen
+channel type.
+
+The layout test uses a deterministic model with the real Slack adapter to
+verify native markdown tables and lossless splitting of a Unicode reply longer
+than 11,900 characters. It reads the posted blocks and text, then removes its
+test thread.
+
+The model/router test sends two real Go model replies through the Slack adapter,
+reads the resulting thread and verifies the done reaction. It leaves the model
+conversation in the test channel and prints its link. Input events use a
+synthetic test sender because the bot's own messages are intentionally rejected.
+This tests ingress, conversation memory, streaming delivery and reactions;
+it does not impersonate a human or replace a manual user-mention check.
 
 For live acceptance, mention the bot, follow up in the resulting thread, send a
 DM, request a table and a reply longer than 11,900 characters, and upload a small

@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err(std::io::Error::other("failed to load .env").into());
     }
-    let (agent, go) = provider::agent_from_env()?;
+    let (agent, go) = provider::agent_from_env().await?;
     let adapter = Arc::new(slack::SlackAdapter::new(std::env::var("SLACK_BOT_TOKEN")?)?);
     let identity = adapter.identity().await?;
     let gate = Gate {

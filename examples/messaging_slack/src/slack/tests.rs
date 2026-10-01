@@ -62,6 +62,7 @@ fn emoji_and_download_hosts_are_validated() {
         "👨‍💻",
         "⚡",
         "🆗",
+        "✅",
         "😱",
         "🥱",
         "😨",
@@ -77,6 +78,7 @@ fn emoji_and_download_hosts_are_validated() {
         assert!(emoji_name(emoji).is_ascii());
     }
     assert_eq!(emoji_name(":custom:"), "custom");
+    assert_eq!(emoji_name("✅"), "white_check_mark");
     assert!(trusted_file("https://files.slack.com/files/a"));
     for url in [
         "http://files.slack.com/a",
@@ -150,6 +152,37 @@ async fn server(
         Ok(requests)
     });
     Ok((address, handle))
+}
+
+#[tokio::test]
+async fn read_methods_use_encoded_get_queries_and_bearer_auth()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (url, server) = server(vec![(json!({"ok":true}).to_string(), true); 3]).await?;
+    let adapter = adapter(url)?;
+    for method in [
+        "conversations.history",
+        "conversations.replies",
+        "reactions.get",
+    ] {
+        adapter
+            .api(
+                method,
+                &json!({"channel":"C&1", "ts":"100.001", "inclusive":true, "limit":15}),
+                &adapter.token,
+            )
+            .await?;
+    }
+    let requests = tokio::time::timeout(Duration::from_secs(5), server).await???;
+    for (first, body, auth) in requests {
+        assert!(first.starts_with("GET /"));
+        assert!(first.contains("channel=C%261"));
+        assert!(first.contains("ts=100.001"));
+        assert!(first.contains("inclusive=true"));
+        assert!(first.contains("limit=15"));
+        assert!(body.is_empty());
+        assert_eq!(auth, "Bearer offline-bot-token");
+    }
+    Ok(())
 }
 fn adapter(api: String) -> Result<SlackAdapter, Error> {
     let mut adapter = SlackAdapter::new("offline-bot-token".into())?;

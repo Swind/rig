@@ -69,17 +69,35 @@ impl SlackAdapter {
         })
     }
     async fn api(&self, method: &str, body: &Value, token: &str) -> Result<Value, Error> {
-        let request = self
-            .client
-            .post(format!("{}/{method}", self.api))
-            .bearer_auth(token);
-        let request = if method == "apps.connections.open" {
-            request
+        let url = format!("{}/{method}", self.api);
+        let request = if matches!(
+            method,
+            "conversations.history" | "conversations.replies" | "reactions.get"
+        ) {
+            let mut url =
+                reqwest::Url::parse(&url).map_err(|_| Error::Missing("valid Slack API URL"))?;
+            if let Some(body) = body.as_object() {
+                let mut query = url.query_pairs_mut();
+                for (key, value) in body {
+                    query.append_pair(
+                        key,
+                        &value
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| value.to_string()),
+                    );
+                }
+            }
+            self.client.get(url)
+        } else if method == "apps.connections.open" {
+            self.client
+                .post(url)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body("")
         } else {
-            request.json(body)
-        };
+            self.client.post(url).json(body)
+        }
+        .bearer_auth(token);
         let result: Value = request.send().await?.error_for_status()?.json().await?;
         if result.get("ok").and_then(Value::as_bool) != Some(true) {
             return Err(Error::Api {
@@ -150,6 +168,7 @@ fn emoji_name(emoji: &str) -> &str {
         "👨‍💻" => "technologist",
         "⚡" => "zap",
         "🆗" => "ok",
+        "✅" => "white_check_mark",
         "😱" => "scream",
         "🥱" => "yawning_face",
         "😨" => "fearful",
@@ -504,5 +523,9 @@ impl Recent {
     }
 }
 
+#[cfg(test)]
+mod live_layout_tests;
+#[cfg(test)]
+mod live_tests;
 #[cfg(test)]
 mod tests;
