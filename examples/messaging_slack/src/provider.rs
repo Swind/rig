@@ -155,7 +155,12 @@ fn go_model(
     }
     let (api, base) = endpoint(endpoint_url)?;
     let client = reqwest::Client::builder()
-        .user_agent(concat!("rig-messaging-slack/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!(
+            "rig-",
+            env!("CARGO_PKG_NAME"),
+            "/",
+            env!("CARGO_PKG_VERSION")
+        ))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(300))
         .build()?;
@@ -230,4 +235,5 @@ pub(crate) async fn agent_from_env() -> Result<(Agent, bool), Error> {
 }
 
 #[cfg(test)]
+#[path = "provider/tests.rs"]
 mod tests;

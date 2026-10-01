@@ -27,7 +27,7 @@ Feishu WebSocket protobuf／CardKit。平台本身缺少的功能使用 capabili
 | --- | --- | --- | --- |
 | Telegram | `openab-gateway/src/adapters/telegram.rs` | Webhook secret，可加 long polling | 4096 字元；chat/topic identity；UTF-16 mention offsets；send/edit/delete/reactions；rich drafts 僅 private chat |
 | LINE | `openab-gateway/src/adapters/line.rs` | Raw-body HMAC-SHA256 signature | 5000 字元；一次 reply token 與 push fallback；無 edit/delete/reactions/thread；保留真實 reply/push ids |
-| LINE WORKS | `openab-gateway/src/adapters/lineworks.rs` | Signed callback，service-account JWT OAuth | user/channel endpoints；10,000 字元；token cache + 401 refresh；Flex + text fallback；無 edit/reactions/thread |
+| LINE WORKS | `openab-gateway/src/adapters/lineworks.rs` | Signed callback，service-account JWT OAuth | user/channel endpoints；10,000 字元；201 ACK 無 message id；token cache + 401 refresh；Flex + text fallback；無 edit/reactions/thread |
 | Teams | `openab-gateway/src/adapters/teams.rs` | Bot Connector JWT/JWKS、issuer/audience/tenant/service URL | 真實 activity ids；replyToId；send/update/delete；不能複製 reference 的 edit command 落入 send 行為 |
 | Google Chat | `openab-gateway/src/adapters/googlechat.rs` | Google OIDC、audience、issuer 與 Chat signer | 真實 resource ids；space/thread；OAuth 或 GCP service-account impersonation；edit/delete API 可用，bot reactions 不等同 user reactions |
 | Feishu/Lark | `openab-gateway/src/adapters/feishu.rs`、`feishu_card.rs` | Verified/encrypted webhook 與 WebSocket protobuf frames | Tenant token cache；DM/thread/post；edit/delete/reactions；CardKit streaming；domain 決定 Feishu 或 Lark |
@@ -163,6 +163,8 @@ Teams service URL 必須經可信 JWT/service URL policy 驗證，不能從未�
 每個平台必須有可執行 ingress 與真實 outbound HTTP serialization；offline fixtures
 至少驗證 valid／invalid authentication、identity/session keys、Gate-before-media、
 message bounds、unsupported capability、actual ids、token expiry 與平台 error propagation。
+LINE WORKS 的 send API 回傳 201 而沒有 message id，因此只確認最終發送成功；
+`send_final` 支援無地址的 acknowledgement，`send` 不捏造 message id。
 WS/poll/encryption/CardKit 等平台模式還需其對應 transport fixtures。
 
 Live credentials 與公開 callback 是線上驗收條件；缺少它們不阻止完整的實作與離線驗證，

@@ -1,6 +1,10 @@
 # rig-messaging
 
 Native messaging platform transports and conversation routing for Rig agents.
+
+Authenticated Telegram, LINE, LINE WORKS, Teams, Google Chat, Feishu/Lark and
+WeCom integrations live in [rig-messaging-platforms](../rig-messaging-platforms).
+
 Platform ingress normalizes messages into `Inbound`. `ChatAdapter` provides
 outbound send, edit, delete and reaction operations without platform SDKs.
 

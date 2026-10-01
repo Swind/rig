@@ -7761,6 +7761,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "messaging_gateway"
+version = "0.42.0"
+dependencies = [
+ "axum 0.8.9",
+ "dotenvy",
+ "futures",
+ "rig-agent",
+ "rig-core",
+ "rig-http",
+ "rig-messaging",
+ "rig-messaging-platforms",
+ "rig-reqwest",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "messaging_slack"
 version = "0.42.0"
 dependencies = [
@@ -9636,6 +9654,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
  "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -10438,6 +10457,7 @@ dependencies = [
  "rig-lancedb",
  "rig-memory",
  "rig-messaging",
+ "rig-messaging-platforms",
  "rig-milvus",
  "rig-mongodb",
  "rig-neo4j",
@@ -10799,6 +10819,38 @@ dependencies = [
  "tracing",
  "unicode-segmentation",
  "unicode-width",
+]
+
+[[package]]
+name = "rig-messaging-platforms"
+version = "0.42.0"
+dependencies = [
+ "aes",
+ "axum 0.8.9",
+ "base64 0.22.1",
+ "bytes",
+ "cbc",
+ "chrono",
+ "futures",
+ "hmac 0.12.1",
+ "http 1.4.2",
+ "image",
+ "jsonwebtoken",
+ "prost 0.14.4",
+ "quick-xml",
+ "reqwest 0.13.4",
+ "rig-agent",
+ "rig-core",
+ "rig-messaging",
+ "rig-reqwest",
+ "rig-tungstenite",
+ "serde",
+ "serde_json",
+ "sha1 0.10.6",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -189,6 +189,7 @@ rig = { version = "0.36.0", features = ["lancedb", "fastembed"] }
 | HelixDB | [`rig-helixdb`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-helixdb) | `helixdb` | `rig::helixdb` |
 | LanceDB | [`rig-lancedb`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-lancedb) | `lancedb` | `rig::lancedb` |
 | Messaging transports (native) | [`rig-messaging`](crates/rig-messaging) | `messaging` | `rig::messaging` |
+| Messaging platform gateways (native) | [`rig-messaging-platforms`](crates/rig-messaging-platforms) | `messaging-platforms`, platform features | `rig::messaging_platforms` |
 | Memory policies | [`rig-memory`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-memory) | `memory` | `rig::memory` |
 | Milvus | [`rig-milvus`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-milvus) | `milvus` | `rig::milvus` |
 | MongoDB | [`rig-mongodb`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-mongodb) | `mongodb` | `rig::mongodb` |

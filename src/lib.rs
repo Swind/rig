@@ -270,3 +270,8 @@ companion_modules! {
 #[cfg(all(feature = "messaging", not(target_family = "wasm")))]
 #[cfg_attr(docsrs, doc(cfg(feature = "messaging")))]
 pub use rig_messaging as messaging;
+
+/// Authenticated native messaging platform integrations.
+#[cfg(all(feature = "messaging-platforms", not(target_family = "wasm")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "messaging-platforms")))]
+pub use rig_messaging_platforms as messaging_platforms;

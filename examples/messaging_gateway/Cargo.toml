@@ -1,0 +1,25 @@
+[package]
+name = "messaging_gateway"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rig-messaging.workspace = true
+rig-messaging-platforms = { path = "../../crates/rig-messaging-platforms", features = ["telegram", "line", "lineworks", "wecom", "teams", "googlechat", "feishu"] }
+rig-agent = { path = "../../crates/rig-agent", default-features = false }
+rig-core = { path = "../../crates/rig-core", default-features = false, features = ["reqwest", "rustls"] }
+rig-http = { path = "../../crates/rig-http" }
+rig-reqwest.workspace = true
+dotenvy.workspace = true
+axum.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net"] }
+
+[dev-dependencies]
+futures.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

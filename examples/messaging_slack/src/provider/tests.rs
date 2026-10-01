@@ -123,7 +123,11 @@ async fn all_go_protocols_stream_with_correct_auth_and_conversation_headers()
             assert!(
                 headers
                     .get("user-agent")
-                    .is_some_and(|agent| agent.starts_with("rig-messaging-slack/"))
+                    .is_some_and(|agent| agent.starts_with(concat!(
+                        "rig-",
+                        env!("CARGO_PKG_NAME"),
+                        "/"
+                    )))
             );
             let auth = if messages_api {
                 "x-api-key"

@@ -12,7 +12,7 @@
 
 ```mermaid
 flowchart LR
-    Platform["Slack / Discord / stdio"] --> Ingress["平台 ingress"]
+    Platform["通訊平台 / stdio"] --> Ingress["平台 ingress"]
     Ingress --> Router["rig-messaging: Gate + ChatRouter"]
     Router --> Agent["rig-agent: Agent + memory"]
     Agent --> Model["rig-core: model / provider / transport"]
@@ -24,8 +24,10 @@ flowchart LR
     Worker --> Adapter
 ```
 
-目前平台實作放在 `examples/messaging_*`，共用套件沒有 Slack SDK 或 serenity 依賴。
-這讓新增平台能共用相同的 router、egress 與 reactions。
+Slack、Discord 與 stdio 的實作放在 `examples/messaging_*`。
+其他七個平台的 authenticated ingress、outbound 與共用 gateway 放在
+[`rig-messaging-platforms`](../rig-messaging-platforms/README.md)。
+共用 router 套件沒有平台 SDK 依賴；平台能共用相同的 egress 與 reactions。
 
 套件依賴 `rig-core`、`rig-agent` 與 Tokio，僅支援 native target。
 可直接依賴 `rig-messaging`，或啟用 facade 的 `messaging` feature，透過
@@ -48,6 +50,8 @@ flowchart LR
 
 `ChannelRef` 包含 `platform`、`scope_id`、`channel_id` 與 `thread_id`。
 `scope_id` 表示 workspace、guild 或 tenant；`thread_id` 用於頻道內嵌的 thread。
+LINE WORKS callback 不提供 message resource id，因此 ingress 使用 issued time
+與 raw-body digest 作為去重 identity；該值不能當成平台 API 的訊息地址。
 Discord thread 自身就是 channel，因此可使用 thread 的 `channel_id`，並讓 `thread_id` 為 `None`。
 Ingress 必須自行設定正確的 `is_thread`，不能只由 `thread_id` 是否存在推導。
 
@@ -75,6 +79,12 @@ Ingress 必須自行設定正確的 `is_thread`，不能只由 `thread_id` 是�
 允許後才建立回覆 thread 或執行附件下載，最後呼叫 `router.handle`。
 `handle` 會再次檢查 Gate。被拒絕的輸入回傳 `Ok(())`，不建立 reaction worker、
 不呼叫 Agent，也不發送回覆。
+
+`rig-messaging-platforms::Gateway` 在 normalization 前驗證 raw request，然後
+依序執行 Gate、bounded deduplication 與 `Platform::prepare`。準備失敗時移除
+去重紀錄，允許重試；成功後透過 `Platform::scope` 綁定 reply token 等單次事件
+context，再執行 router。Webhook ACK 不等待 media 或 Agent，且不代表 durable queue。
+Polling 與 WebSocket 的已驗證事件透過相同的 `dispatch_event` 流程接入。
 
 Gate 的規則如下：
 
@@ -222,6 +232,7 @@ Reaction API 失敗只記錄 debug log，不改變回覆結果；adapter 的 tim
 | [Slack](../../examples/messaging_slack/README.md) | Socket Mode；channel id + thread timestamp；DM 可無 thread | 11,900 scalars；Block Kit Markdown，平台可轉成原生 blocks | Workspace example，使用既有 HTTP／WebSocket transports |
 | [Discord](../../examples/messaging_discord/README.md) | Serenity events；mention 建立 thread channel；DM 與既有 thread | 2000 scalars；共用表格轉換 | 獨立 workspace，隔離 serenity 的依賴圖 |
 | [stdio](../../examples/messaging_stdio/README.md) | 每行輸入，單一 `stdio/local` conversation，逐行等待完成 | 完成後輸出每段；無 edit 或 reactions | Workspace example，供本機開發 |
+| [其他七個平台](../rig-messaging-platforms/README.md) | Telegram、LINE、LINE WORKS、Teams、Google Chat、Feishu/Lark、WeCom 的 verified ingress | 各自提供可用的 text/rich、thread、edit/delete/reactions 與 final acknowledgement | Native companion 與 [gateway example](../../examples/messaging_gateway/README.md) |
 
 Slack 在啟動 Agent task 前 ACK envelope，並保留最近 1024 個原始訊息 identity，
 避免 mention/message 訂閱重疊與 reconnect 造成重複處理。此去重資料跨 reconnect，

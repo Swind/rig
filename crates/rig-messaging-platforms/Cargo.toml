@@ -1,0 +1,72 @@
+[package]
+name = "rig-messaging-platforms"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+readme = "README.md"
+description = "Authenticated native messaging platform integrations for Rig."
+repository = "https://github.com/0xPlaygrounds/rig"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+telegram = []
+line = []
+lineworks = ["dep:jsonwebtoken"]
+wecom = ["dep:aes", "dep:cbc", "dep:sha1", "dep:quick-xml"]
+teams = ["dep:jsonwebtoken"]
+googlechat = ["dep:jsonwebtoken", "dep:chrono"]
+feishu = ["dep:aes", "dep:cbc", "dep:prost", "dep:rig-tungstenite", "dep:image"]
+
+[dependencies]
+rig-core = { path = "../rig-core", version = "0.42.0", default-features = false }
+rig-messaging = { path = "../rig-messaging", version = "0.42.0" }
+rig-reqwest = { path = "../rig-reqwest", version = "0.42.0" }
+bytes.workspace = true
+http.workspace = true
+reqwest = { workspace = true, features = ["form"] }
+axum.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+futures.workspace = true
+tracing.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hmac = "0.12.1"
+aes = { version = "0.9.2", optional = true }
+cbc = { version = "0.2.1", optional = true, features = ["alloc", "block-padding"] }
+sha1 = { version = "0.10.6", optional = true }
+jsonwebtoken = { version = "10.3.0", optional = true, features = ["rust_crypto"] }
+
+[dev-dependencies]
+rig-agent = { path = "../rig-agent", version = "0.42.0", default-features = false, features = ["test-utils"] }
+rig-core = { path = "../rig-core", version = "0.42.0", default-features = false, features = ["test-utils"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "net"] }
+
+[dependencies.prost]
+workspace = true
+optional = true
+
+[dependencies.rig-tungstenite]
+path = "../rig-tungstenite"
+version = "0.42.0"
+optional = true
+
+[dependencies.quick-xml]
+workspace = true
+optional = true
+features = ["serialize"]
+
+[dependencies.image]
+workspace = true
+optional = true
+features = ["jpeg", "png", "gif", "webp"]
+
+[dependencies.chrono]
+workspace = true
+optional = true
