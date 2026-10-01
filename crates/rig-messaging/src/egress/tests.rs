@@ -80,6 +80,34 @@ async fn preview_is_throttled_and_final_text_is_authoritative() -> TestResult {
     assert!(matches!(&calls[0],Call::Send(_,s) if s=="…"));
     assert!(matches!(&calls[1],Call::Edit(_,s) if s=="abc"));
     assert!(matches!(&calls[2],Call::Edit(_,s) if s=="authoritative"));
+    assert_eq!(adapter.final_edits.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.final_sends.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn final_delivery_accepts_platforms_without_outbound_addresses() -> TestResult {
+    let adapter = FakeAdapter {
+        edits: false,
+        idless_final: true,
+        limit: 5,
+        ..Default::default()
+    };
+    egress(
+        &adapter,
+        &inbound("").reply_channel,
+        stream(vec![text("preview")?, final_response("hello world")]),
+        &ChatConfig::default(),
+    )
+    .await?;
+    assert_eq!(adapter.final_sends.load(Ordering::SeqCst), 3);
+    assert_eq!(adapter.final_edits.load(Ordering::SeqCst), 0);
+    assert!(
+        adapter
+            .calls()
+            .iter()
+            .all(|call| matches!(call, Call::Send(_, _)))
+    );
     Ok(())
 }
 

@@ -26,6 +26,9 @@ pub(crate) struct FakeAdapter {
     pub fail_reactions: AtomicUsize,
     pub reaction_block: Option<std::sync::Arc<tokio::sync::Notify>>,
     pub(crate) counter: AtomicUsize,
+    pub(crate) final_sends: AtomicUsize,
+    pub(crate) final_edits: AtomicUsize,
+    pub(crate) idless_final: bool,
 }
 
 impl Default for FakeAdapter {
@@ -42,6 +45,9 @@ impl Default for FakeAdapter {
             fail_reactions: AtomicUsize::new(0),
             reaction_block: None,
             counter: AtomicUsize::new(0),
+            final_sends: AtomicUsize::new(0),
+            final_edits: AtomicUsize::new(0),
+            idless_final: false,
         }
     }
 }
@@ -88,6 +94,9 @@ impl ChatAdapter for FakeAdapter {
         text: &'a str,
     ) -> WasmBoxedFuture<'a, Result<MessageRef, ChatError>> {
         Box::pin(async move {
+            if self.idless_final {
+                return Err(ChatError::Unsupported("message addresses"));
+            }
             self.record(Call::Send(ch.clone(), text.into()));
             if Self::fails(&self.fail_sends) {
                 return Err(Self::error());
@@ -97,6 +106,29 @@ impl ChatAdapter for FakeAdapter {
                 message_id: self.counter.fetch_add(1, Ordering::SeqCst).to_string(),
             })
         })
+    }
+    fn send_final<'a>(
+        &'a self,
+        ch: &'a ChannelRef,
+        text: &'a str,
+    ) -> WasmBoxedFuture<'a, Result<(), ChatError>> {
+        Box::pin(async move {
+            self.final_sends.fetch_add(1, Ordering::SeqCst);
+            if self.idless_final {
+                self.record(Call::Send(ch.clone(), text.into()));
+                Ok(())
+            } else {
+                self.send(ch, text).await.map(|_| ())
+            }
+        })
+    }
+    fn edit_final<'a>(
+        &'a self,
+        m: &'a MessageRef,
+        text: &'a str,
+    ) -> WasmBoxedFuture<'a, Result<(), ChatError>> {
+        self.final_edits.fetch_add(1, Ordering::SeqCst);
+        self.edit(m, text)
     }
     fn edit<'a>(
         &'a self,

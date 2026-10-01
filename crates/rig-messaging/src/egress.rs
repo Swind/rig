@@ -25,7 +25,7 @@ async fn deliver(
         if index == 0
             && let Some(message) = placeholder
         {
-            if adapter.edit(message, chunk).await.is_ok() {
+            if adapter.edit_final(message, chunk).await.is_ok() {
                 continue;
             }
             if let Err(error) = adapter.delete(message).await {
@@ -33,7 +33,7 @@ async fn deliver(
                 failure = Some(error);
             }
         }
-        if let Err(error) = adapter.send(channel, chunk).await {
+        if let Err(error) = adapter.send_final(channel, chunk).await {
             tracing::debug!(%error, "final message delivery failed");
             if failure.is_none() {
                 failure = Some(error);

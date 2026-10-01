@@ -138,6 +138,10 @@ Router 不下載 URL、不檢查 attachment size，也不替 provider 取得私�
 
 `ChatAdapter` 提供 `send`、`edit`、`delete`、`add_reaction` 與 `remove_reaction`。
 `send` 回傳真實 `MessageRef`，供後續編輯與刪除使用。
+`send_final` 確認最終文字已被平台接受，不要求回傳地址；預設呼叫 `send`。
+`edit_final` 預設呼叫 `edit`，原生串流 adapter 可用它關閉 streaming 狀態。
+沒有 outbound message id 的平台應停用 preview，實作 `send_final`，並讓 `send`
+回傳 `Unsupported`，不能捏造可編輯的訊息地址。
 非支援操作使用 `ChatError::Unsupported`；平台失敗使用 `ChatError::Platform`。
 非同步方法使用 Rig 的 `WasmBoxedFuture` 與相容 bounds，但套件本身仍僅支援 native。
 
@@ -165,7 +169,8 @@ Adapter 負責 API timeout、平台 id 驗證、格式轉換與 mentions／unfur
 若 wrapper 或單個 grapheme 無法容納，使用保持 UTF-8 有效的 scalar 分段，遵守長度上限。
 `TableMode` 預設為 `Code`，另有 `Bullets` 與 `Off`；原生表格平台強制使用 `Off`。
 
-第一段優先編輯 placeholder。失敗後嘗試刪除 placeholder，再發送替代訊息；
+第一段優先以 `edit_final` 編輯 placeholder。失敗後嘗試刪除 placeholder，再以
+`send_final` 發送替代訊息；
 即使刪除失敗也會嘗試發送。其餘段落逐一發送，某段失敗仍會嘗試後續段落。
 未刪除的舊 placeholder 或未交付段落都會使結果為 error。
 

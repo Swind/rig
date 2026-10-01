@@ -52,12 +52,30 @@ pub trait ChatAdapter: WasmCompatSend + WasmCompatSync + 'static {
         ch: &'a ChannelRef,
         text: &'a str,
     ) -> WasmBoxedFuture<'a, Result<MessageRef, ChatError>>;
+    /// Send a final response and acknowledge acceptance without requiring a message address.
+    /// Platforms with native streaming must create closed content for this operation.
+    fn send_final<'a>(
+        &'a self,
+        ch: &'a ChannelRef,
+        text: &'a str,
+    ) -> WasmBoxedFuture<'a, Result<(), ChatError>> {
+        Box::pin(async move { self.send(ch, text).await.map(|_| ()) })
+    }
     /// Replace text. Return `Unsupported` when edits are unavailable.
     fn edit<'a>(
         &'a self,
         m: &'a MessageRef,
         text: &'a str,
     ) -> WasmBoxedFuture<'a, Result<(), ChatError>>;
+    /// Replace provisional content with the final response and close native streaming.
+    /// Defaults to a text edit for platforms without a streaming lifecycle.
+    fn edit_final<'a>(
+        &'a self,
+        m: &'a MessageRef,
+        text: &'a str,
+    ) -> WasmBoxedFuture<'a, Result<(), ChatError>> {
+        self.edit(m, text)
+    }
     /// Delete an existing message.
     fn delete<'a>(&'a self, m: &'a MessageRef) -> WasmBoxedFuture<'a, Result<(), ChatError>>;
     /// Add the bot's reaction to an existing message.
