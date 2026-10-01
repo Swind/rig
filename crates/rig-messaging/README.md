@@ -7,6 +7,9 @@ outbound send, edit, delete and reaction operations without platform SDKs.
 Use the companion directly or enable the facade's `messaging` feature and import
 `rig::messaging`. This crate supports native targets only.
 
+See [CONTRACT.md](CONTRACT.md) for the architecture, routing and delivery
+contracts, platform boundaries, and model-context integration.
+
 Message references retain the original channel for reactions. `reply_channel`
 selects the destination and conversation identity. Session keys encode all four
 routing fields with lengths so platform identifiers cannot collide.
