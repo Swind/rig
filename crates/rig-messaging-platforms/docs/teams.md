@@ -60,3 +60,7 @@ explicitly designated tenant/conversation and credentials.
 
 Protocol sources: [Connector authentication](https://learn.microsoft.com/en-us/azure/bot-service/rest-api/bot-framework-rest-connector-authentication),
 [Teams conversations](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/build-conversational-capability).
+
+Inbound context copies the activity timestamp, mention entities with stable
+mentioned IDs, and a channel or conversation name when that activity supplies
+one. Missing mention names fall back to the mentioned ID.

@@ -21,7 +21,7 @@ fn adapter() -> Result<Teams, Error> {
     )
 }
 fn activity() -> Value {
-    json!({"type":"message","id":"original","serviceUrl":"https://smba.trafficmanager.net/region/","channelId":"msteams","channelData":{"tenant":{"id":"tenant"}},"conversation":{"id":"conversation","conversationType":"channel"},"from":{"id":"user","name":"User"},"text":"<at>Rig</at> hello","entities":[{"type":"mention","mentioned":{"id":"28:app"},"text":"<at>Rig</at>"}]})
+    json!({"type":"message","id":"original","timestamp":"2026-10-01T00:00:00Z","serviceUrl":"https://smba.trafficmanager.net/region/","channelId":"msteams","channelData":{"tenant":{"id":"tenant"},"channel":{"name":"General"}},"conversation":{"id":"conversation","conversationType":"channel"},"from":{"id":"user","name":"User"},"text":"<at>Rig</at> hello","entities":[{"type":"mention","mentioned":{"id":"28:app","name":"Rig"},"text":"<at>Rig</at>"},{"type":"mention","mentioned":{"id":"29:person","name":"Alice"},"text":"<at>Alice</at>"}]})
 }
 
 #[test]
@@ -31,6 +31,16 @@ fn normalization_preserves_thread_identity_and_native_mentions() -> Result<(), E
         .normalize(&activity())?
         .ok_or(Error::Invalid("fixture event"))?;
     assert_eq!(event.inbound.sender.id, "user");
+    assert_eq!(
+        event.inbound.context.channel_name.as_deref(),
+        Some("General")
+    );
+    assert_eq!(
+        event.inbound.context.sent_at.map(|time| time.to_rfc3339()),
+        Some("2026-10-01T00:00:00+00:00".into())
+    );
+    assert_eq!(event.inbound.context.mentions.len(), 2);
+    assert_eq!(event.inbound.context.mentions[1].name, "Alice");
     assert_eq!(event.inbound.text, "hello");
     assert_eq!(
         event.inbound.reply_channel.thread_id.as_deref(),

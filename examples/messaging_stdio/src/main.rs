@@ -132,6 +132,7 @@ async fn run_lines(
             is_dm: true,
             is_thread: false,
             mentions_bot: false,
+            context: rig_messaging::MessageContext::default(),
         };
         next_input += 1;
         if let Err(error) = router.handle(adapter.clone(), inbound, "rig-bot").await {

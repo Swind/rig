@@ -14,15 +14,19 @@ assert_eq!(WebhookResponse::ack().status.as_u16(), 200);
 # Ok(()) }
 ```
 
-| Feature | Transport | Delivery |
-| --- | --- | --- |
-| [`telegram`](docs/telegram.md) | Secret-authenticated webhook or long polling | Text/rich text, private drafts, forum topics, edits, deletes, reactions |
-| [`line`](docs/line.md) | Signed webhook | One-use reply token, then push; actual message IDs |
-| [`lineworks`](docs/lineworks.md) | Signed webhook, service-account OAuth | Flex or text; accepted final sends have no message ID |
-| [`wecom`](docs/wecom.md) | Encrypted corporate callbacks | Direct user text and recall |
-| [`teams`](docs/teams.md) | Bot Connector JWT webhook | Markdown, replies, update and delete |
-| [`googlechat`](docs/googlechat.md) | Google JWT webhook | Space/thread messages, update and delete |
-| [`feishu`](docs/feishu.md) | Signed/encrypted webhook or native WebSocket | Feishu/Lark text, posts, CardKit streaming, threads, edits, deletes, reactions |
+| Feature | Transport | Delivery | Inbound context metadata |
+| --- | --- | --- | --- |
+| [`telegram`](docs/telegram.md) | Secret-authenticated webhook or long polling | Text/rich text, private drafts, forum topics, edits, deletes, reactions | Chat title/username, message time, structured user mentions |
+| [`line`](docs/line.md) | Signed webhook | One-use reply token, then push; actual message IDs | Event time and mentions with user IDs; no channel display name |
+| [`lineworks`](docs/lineworks.md) | Signed webhook, service-account OAuth | Flex or text; accepted final sends have no message ID | Event time; no channel display name or structured mentions |
+| [`wecom`](docs/wecom.md) | Encrypted corporate callbacks | Direct user text and recall | Event time; no channel display name or structured mentions |
+| [`teams`](docs/teams.md) | Bot Connector JWT webhook | Markdown, replies, update and delete | Event time, supplied channel/conversation name, mention entities |
+| [`googlechat`](docs/googlechat.md) | Google JWT webhook | Space/thread messages, update and delete | Space display name, message time, annotated user mentions |
+| [`feishu`](docs/feishu.md) | Signed/encrypted webhook or native WebSocket | Feishu/Lark text, posts, CardKit streaming, threads, edits, deletes, reactions | Event time and mention IDs/names; no channel display name |
+
+Context values are copied from each verified inbound payload. Missing names and
+timestamps remain absent; sender and mention names fall back to stable platform
+IDs when the payload omits a name. The adapters do not make extra profile lookups.
 
 The facade exposes `rig::messaging_platforms` with `messaging-platforms` and
 individual `messaging-telegram`, `messaging-line`, `messaging-lineworks`,

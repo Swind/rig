@@ -11,9 +11,11 @@
 use crate::{Error, Http, Incoming, Platform, TokenCache, WebhookRequest, WebhookResponse, auth};
 use ::http::{Method, StatusCode};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use chrono::{DateTime, Utc};
 use rig_core::wasm_compat::WasmBoxedFuture;
 use rig_messaging::{
-    Attachment, AttachmentSource, ChannelRef, ChatAdapter, ChatError, Inbound, MessageRef, Sender,
+    Attachment, AttachmentSource, ChannelRef, ChatAdapter, ChatError, Inbound, MessageContext,
+    MessageRef, Sender,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -232,6 +234,11 @@ impl Platform for LineWorks {
                 .unwrap_or(&Value::Null)
                 .as_str()
                 .unwrap_or_default();
+            let sent_at = event
+                .pointer("/issuedTime")
+                .and_then(Value::as_str)
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|time| time.with_timezone(&Utc));
             let identity = format!(
                 "{issued}:{}",
                 STANDARD.encode(Sha256::digest(&request.body))
@@ -243,6 +250,11 @@ impl Platform for LineWorks {
                         message_id: identity,
                     },
                     reply_channel: channel,
+                    context: MessageContext {
+                        channel_name: None,
+                        sent_at,
+                        mentions: Vec::new(),
+                    },
                     sender: Sender {
                         id: user.into(),
                         name: user.into(),

@@ -29,4 +29,6 @@ pub use router::{ChatConfig, ChatRouter};
 
 #[cfg(test)]
 mod test_support;
-pub use types::{Attachment, AttachmentSource, ChannelRef, Inbound, MessageRef, Sender};
+pub use types::{
+    Attachment, AttachmentSource, ChannelRef, Inbound, MessageContext, MessageRef, Sender,
+};

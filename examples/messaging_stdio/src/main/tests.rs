@@ -39,11 +39,9 @@ async fn piped_lines_preserve_order_and_history_without_edits_or_reactions()
             .chat_history
             .contains(&Message::assistant("reply one"))
     );
-    assert!(
-        model.requests()[1]
-            .chat_history
-            .contains(&Message::user("[user (local)]\nfirst"))
-    );
+    assert!(model.requests()[1].chat_history.contains(&Message::user(
+        "Platform: stdio\nChannel: local\nSender: user (local)\n\nfirst"
+    )));
     assert_eq!(model.request_count(), 2);
     Ok(())
 }

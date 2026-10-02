@@ -27,8 +27,22 @@ fn utf16_mentions_handle_astral_characters() {
 #[test]
 fn topic_identity_and_mention_are_normalized() -> Result<(), Error> {
     let bot = adapter()?;
-    let event = bot.normalize(&json!({"update_id":1,"message":{"message_id":7,"message_thread_id":9,"chat":{"id":-100,"type":"supergroup"},"from":{"id":8,"first_name":"Sender","is_bot":false},"text":"😀 @RigBot", "entities":[{"type":"mention","offset":3,"length":7}]}}))?.ok_or(Error::Invalid("test event"))?;
+    let event = bot.normalize(&json!({"update_id":1,"message":{"message_id":7,"date":1600000000,"message_thread_id":9,"chat":{"id":-100,"type":"supergroup","title":"Room"},"from":{"id":8,"first_name":"Sender","is_bot":false},"text":"😀 @RigBot", "entities":[{"type":"mention","offset":3,"length":7},{"type":"text_mention","offset":11,"length":5,"user":{"id":10,"first_name":"Mentioned","last_name":"User","is_bot":false}}]}}))?.ok_or(Error::Invalid("test event"))?;
     assert_eq!(event.inbound.message.message_id, "7");
+    assert_eq!(event.inbound.context.channel_name.as_deref(), Some("Room"));
+    assert_eq!(
+        event.inbound.context.sent_at.map(|time| time.timestamp()),
+        Some(1600000000)
+    );
+    assert_eq!(
+        event
+            .inbound
+            .context
+            .mentions
+            .first()
+            .map(|sender| sender.name.as_str()),
+        Some("Mentioned User")
+    );
     assert_eq!(event.inbound.reply_channel.thread_id.as_deref(), Some("9"));
     assert!(event.inbound.mentions_bot);
     assert!(event.inbound.is_thread);

@@ -10,18 +10,24 @@ use rig_http::{
 };
 use rig_messaging::{
     Attachment, AttachmentSource, ChannelRef, ChatAdapter, ChatError, ChatRouter, Inbound,
-    MessageRef, Sender,
+    MessageContext, MessageRef, Sender,
 };
 use rig_reqwest::reqwest;
 use serde_json::{Value, json};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
+use tokio::sync::Mutex;
 
 const LIMIT: usize = 11_900;
 const ATTACHMENT_LIMIT: usize = 10 * 1024 * 1024;
+const METADATA_CACHE_LIMIT: usize = 1024;
+const METADATA_TTL: Duration = Duration::from_secs(300);
+const METADATA_FAILURE_TTL: Duration = Duration::from_secs(30);
+const MAX_MENTION_LOOKUPS: usize = 16;
+const METADATA_ENRICHMENT_BUDGET: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -57,7 +63,21 @@ pub(crate) struct SlackAdapter {
     client: reqwest::Client,
     token: String,
     api: String,
+    metadata: Mutex<HashMap<String, CachedMetadata>>,
 }
+
+#[derive(Clone)]
+enum Metadata {
+    User { name: String, is_bot: bool },
+    Channel(String),
+}
+
+#[derive(Clone)]
+struct CachedMetadata {
+    value: Metadata,
+    expires: Instant,
+}
+
 impl SlackAdapter {
     pub(crate) fn new(token: String) -> Result<Self, Error> {
         Ok(Self {
@@ -66,13 +86,181 @@ impl SlackAdapter {
                 .build()?,
             token,
             api: "https://slack.com/api".into(),
+            metadata: Mutex::new(HashMap::new()),
         })
     }
+
+    async fn cached_metadata(&self, key: &str) -> Option<Metadata> {
+        let mut cache = self.metadata.lock().await;
+        match cache.get(key) {
+            Some(entry) if entry.expires > Instant::now() => Some(entry.value.clone()),
+            Some(_) => {
+                cache.remove(key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    async fn cache_metadata(&self, key: String, value: Metadata, ttl: Duration) {
+        let mut cache = self.metadata.lock().await;
+        let now = Instant::now();
+        cache.retain(|_, entry| entry.expires > now);
+        if cache.len() >= METADATA_CACHE_LIMIT
+            && !cache.contains_key(&key)
+            && let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.expires)
+                .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest);
+        }
+        cache.insert(
+            key,
+            CachedMetadata {
+                value,
+                expires: now + ttl,
+            },
+        );
+    }
+
+    async fn user_metadata(&self, id: &str) -> Metadata {
+        let key = format!("user:{id}");
+        if let Some(value) = self.cached_metadata(&key).await {
+            return value;
+        }
+        let value = match self
+            .api("users.info", &json!({"user": id}), &self.token)
+            .await
+        {
+            Ok(result) => result.get("user").and_then(Value::as_object).map(|user| {
+                let profile = user.get("profile").and_then(Value::as_object);
+                let name = profile
+                    .and_then(|profile| profile.get("display_name"))
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())
+                    .or_else(|| {
+                        profile
+                            .and_then(|profile| profile.get("real_name"))
+                            .and_then(Value::as_str)
+                            .filter(|name| !name.trim().is_empty())
+                    })
+                    .or_else(|| {
+                        user.get("real_name")
+                            .and_then(Value::as_str)
+                            .filter(|name| !name.trim().is_empty())
+                    })
+                    .or_else(|| {
+                        user.get("name")
+                            .and_then(Value::as_str)
+                            .filter(|name| !name.trim().is_empty())
+                    })
+                    .unwrap_or(id);
+                Metadata::User {
+                    name: name.into(),
+                    is_bot: user.get("is_bot").and_then(Value::as_bool).unwrap_or(false),
+                }
+            }),
+            Err(_) => None,
+        };
+        let ttl = if value.is_some() {
+            METADATA_TTL
+        } else {
+            METADATA_FAILURE_TTL
+        };
+        let value = value.unwrap_or_else(|| Metadata::User {
+            name: id.into(),
+            is_bot: false,
+        });
+        self.cache_metadata(key, value.clone(), ttl).await;
+        value
+    }
+
+    async fn channel_name(&self, id: &str) -> String {
+        let key = format!("channel:{id}");
+        if let Some(Metadata::Channel(name)) = self.cached_metadata(&key).await {
+            return name;
+        }
+        let name = self
+            .api("conversations.info", &json!({"channel": id}), &self.token)
+            .await
+            .ok()
+            .and_then(|result| result.get("channel").and_then(Value::as_object).cloned())
+            .and_then(|channel| {
+                channel
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .filter(|name| !name.trim().is_empty());
+        let ttl = if name.is_some() {
+            METADATA_TTL
+        } else {
+            METADATA_FAILURE_TTL
+        };
+        let name = name.unwrap_or_else(|| id.into());
+        self.cache_metadata(key, Metadata::Channel(name.clone()), ttl)
+            .await;
+        name
+    }
+
+    async fn enrich(&self, input: &mut Inbound, bot_id: &str) {
+        let deadline = Instant::now() + METADATA_ENRICHMENT_BUDGET;
+        input.context.channel_name =
+            Some(self.channel_name(&input.message.channel.channel_id).await);
+        let sender = self.user_metadata(&input.sender.id).await;
+        if let Metadata::User { name, is_bot } = sender {
+            input.sender.name = name;
+            input.sender.is_bot |= is_bot;
+        }
+        self.add_mentions(input, bot_id, deadline).await;
+    }
+
+    async fn add_mentions(&self, input: &mut Inbound, bot_id: &str, deadline: Instant) {
+        let ids = mentioned_user_ids(&input.text)
+            .into_iter()
+            .filter(|id| id != bot_id)
+            .collect::<Vec<_>>();
+        for (index, id) in ids.into_iter().enumerate() {
+            let sender = if index < MAX_MENTION_LOOKUPS && Instant::now() < deadline {
+                match self.user_metadata(&id).await {
+                    Metadata::User {
+                        name,
+                        is_bot: false,
+                    } => Some(Sender {
+                        id,
+                        name,
+                        is_bot: false,
+                    }),
+                    Metadata::User { is_bot: true, .. } => None,
+                    Metadata::Channel(_) => Some(Sender {
+                        id: id.clone(),
+                        name: id,
+                        is_bot: false,
+                    }),
+                }
+            } else {
+                Some(Sender {
+                    id: id.clone(),
+                    name: id,
+                    is_bot: false,
+                })
+            };
+            if let Some(sender) = sender {
+                input.context.mentions.push(sender);
+            }
+        }
+    }
+
     async fn api(&self, method: &str, body: &Value, token: &str) -> Result<Value, Error> {
         let url = format!("{}/{method}", self.api);
         let request = if matches!(
             method,
-            "conversations.history" | "conversations.replies" | "reactions.get"
+            "conversations.history"
+                | "conversations.replies"
+                | "conversations.info"
+                | "users.info"
+                | "reactions.get"
         ) {
             let mut url =
                 reqwest::Url::parse(&url).map_err(|_| Error::Missing("valid Slack API URL"))?;
@@ -96,6 +284,11 @@ impl SlackAdapter {
                 .body("")
         } else {
             self.client.post(url).json(body)
+        };
+        let request = if matches!(method, "users.info" | "conversations.info") {
+            request.timeout(Duration::from_secs(3))
+        } else {
+            request
         }
         .bearer_auth(token);
         let result: Value = request.send().await?.error_for_status()?.json().await?;
@@ -314,12 +507,51 @@ fn normalize(payload: &Value, identity: &Identity) -> Option<Inbound> {
             is_bot: event.get("bot_id").is_some()
                 || event.get("subtype").and_then(Value::as_str) == Some("bot_message"),
         },
+        context: MessageContext {
+            sent_at: slack_timestamp(ts),
+            ..MessageContext::default()
+        },
         text: text.replace(&mention, "").trim().into(),
         attachments: vec![],
         is_dm,
         is_thread: thread.is_some(),
         mentions_bot: text.contains(&mention),
     })
+}
+
+fn slack_timestamp(timestamp: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let (seconds, fraction) = timestamp.split_once('.').unwrap_or((timestamp, ""));
+    if seconds.is_empty()
+        || !seconds.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 9
+    {
+        return None;
+    }
+    let seconds = seconds.parse::<i64>().ok()?;
+    let mut nanos = fraction.parse::<u32>().ok().unwrap_or_default();
+    for _ in fraction.len()..9 {
+        nanos *= 10;
+    }
+    chrono::DateTime::from_timestamp(seconds, nanos)
+}
+
+fn mentioned_user_ids(text: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<@") {
+        rest = &rest[start + 2..];
+        let Some(end) = rest.find('>') else {
+            break;
+        };
+        let id = rest[..end].split('|').next().unwrap_or_default();
+        if !id.is_empty() && seen.insert(id.to_owned()) {
+            ids.push(id.to_owned());
+        }
+        rest = &rest[end + 1..];
+    }
+    ids
 }
 fn trusted_file(url: &str) -> bool {
     reqwest::Url::parse(url).is_ok_and(|url| {
@@ -355,6 +587,7 @@ impl Handler {
         if !self.router.allows(&input, &self.identity.bot) {
             return Ok(());
         }
+        self.adapter.enrich(&mut input, &self.identity.bot).await;
         let mut used = 0;
         if let Some(files) = payload
             .get("event")

@@ -11,9 +11,11 @@ use crate::{
     Error, Http, Incoming, Platform, TokenCache, WebhookRequest, WebhookResponse, auth::JwtVerifier,
 };
 use ::http::{Method, StatusCode};
+use chrono::{DateTime, Utc};
 use rig_core::wasm_compat::WasmBoxedFuture;
 use rig_messaging::{
-    Attachment, AttachmentSource, ChannelRef, ChatAdapter, ChatError, Inbound, MessageRef, Sender,
+    Attachment, AttachmentSource, ChannelRef, ChatAdapter, ChatError, Inbound, MessageContext,
+    MessageRef, Sender,
 };
 use serde_json::{Value, json};
 use std::{
@@ -458,24 +460,49 @@ impl Platform for GoogleChat {
                 channel_id: space_id.into(),
                 thread_id: thread,
             };
-            let mention = message
+            let mentions: Vec<Sender> = message
                 .pointer("/annotations")
                 .unwrap_or(&Value::Null)
                 .as_array()
-                .is_some_and(|annotations| {
-                    annotations.iter().any(|annotation| {
-                        annotation
-                            .pointer("/userMention/user/name")
+                .into_iter()
+                .flatten()
+                .filter_map(|annotation| {
+                    let user = annotation.pointer("/userMention/user")?;
+                    let id = user.pointer("/name")?.as_str()?.to_owned();
+                    Some(Sender {
+                        id: id.clone(),
+                        name: user
+                            .pointer("/displayName")
                             .and_then(Value::as_str)
-                            == Some(self.config.bot_id.as_str())
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or(&id)
+                            .to_owned(),
+                        is_bot: user.pointer("/type").and_then(Value::as_str) == Some("BOT"),
                     })
-                });
+                })
+                .collect();
+            let mention = mentions
+                .iter()
+                .any(|mention| mention.id == self.config.bot_id);
             let inbound = Inbound {
                 message: MessageRef {
                     channel: channel.clone(),
                     message_id: name.into(),
                 },
                 reply_channel: channel,
+                context: MessageContext {
+                    channel_name: space
+                        .pointer("/displayName")
+                        .and_then(Value::as_str)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned),
+                    sent_at: message
+                        .pointer("/createTime")
+                        .and_then(Value::as_str)
+                        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                        .map(|time| time.with_timezone(&Utc)),
+                    mentions,
+                },
                 sender: Sender {
                     id: sender_id.into(),
                     name: sender

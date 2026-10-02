@@ -123,7 +123,7 @@ pub(super) fn event() -> Value {
     json!({"schema":"2.0","header":{"app_id":"cli_test","event_type":"im.message.receive_v1","token":"verification-token"},
         "event":{"sender":{"sender_id":{"open_id":"ou_user"},"sender_type":"user"},
         "message":{"message_id":"om_input","chat_id":"oc_chat","chat_type":"group","message_type":"text",
-        "content":json!({"text":"@_user_1 hello"}).to_string(),"mentions":[{"key":"@_user_1","id":{"open_id":"ou_bot"}}]}}})
+        "content":json!({"text":"@_user_1 hello"}).to_string(),"create_time":"1600000000000","mentions":[{"key":"@_user_1","name":"Rig","id":{"open_id":"ou_bot"}},{"key":"@_user_2","name":"Alice","id":{"open_id":"ou_other"}}]}}})
 }
 
 fn signed(value: &Value) -> Result<WebhookRequest, Box<dyn std::error::Error + Send + Sync>> {
@@ -165,6 +165,13 @@ async fn authenticated_callback_preserves_identity_and_rejects_tampering() -> Te
     assert!(!inbound.is_dm);
     assert_eq!(inbound.message.message_id, "om_input");
     assert_eq!(inbound.sender.id, "ou_user");
+    assert_eq!(inbound.context.channel_name, None);
+    assert_eq!(
+        inbound.context.sent_at.map(|time| time.timestamp()),
+        Some(1600000000)
+    );
+    assert_eq!(inbound.context.mentions.len(), 2);
+    assert_eq!(inbound.context.mentions[1].name, "Alice");
     assert_eq!(state.requests.lock().await.len(), 2);
     let mut request = signed(&event())?;
     request.body = Bytes::from_static(b"{}");

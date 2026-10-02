@@ -13,10 +13,12 @@
 use crate::{
     Error, Http, Incoming, Platform, TokenCache, WebhookRequest, WebhookResponse, auth::JwtVerifier,
 };
+use chrono::{DateTime, Utc};
 use http::Method;
 use rig_core::wasm_compat::WasmBoxedFuture;
 use rig_messaging::{
-    Attachment, AttachmentSource, ChannelRef, ChatAdapter, ChatError, Inbound, MessageRef, Sender,
+    Attachment, AttachmentSource, ChannelRef, ChatAdapter, ChatError, Inbound, MessageContext,
+    MessageRef, Sender,
 };
 use rig_reqwest::reqwest::Url;
 use serde_json::{Value, json};
@@ -190,6 +192,7 @@ impl Teams {
             .unwrap_or("")
             .to_owned();
         let mut mentions_bot = false;
+        let mut mentions = Vec::new();
         for entity in activity
             .pointer("/entities")
             .unwrap_or(&Value::Null)
@@ -198,14 +201,25 @@ impl Teams {
             .flatten()
         {
             if entity.pointer("/type").unwrap_or(&Value::Null).as_str() == Some("mention")
-                && entity
+                && let Some(id) = entity
                     .pointer("/mentioned/id")
-                    .unwrap_or(&Value::Null)
-                    .as_str()
-                    .is_some_and(|id| self.own_id(id))
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
             {
-                mentions_bot = true;
-                if let Some(mention) = entity.pointer("/text").unwrap_or(&Value::Null).as_str() {
+                let is_bot = self.own_id(id);
+                mentions_bot |= is_bot;
+                let mentioned = entity.pointer("/mentioned").unwrap_or(&Value::Null);
+                mentions.push(Sender {
+                    id: id.to_owned(),
+                    name: mentioned
+                        .pointer("/name")
+                        .and_then(Value::as_str)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(id)
+                        .to_owned(),
+                    is_bot,
+                });
+                if is_bot && let Some(mention) = entity.pointer("/text").and_then(Value::as_str) {
                     text = text.replace(mention, "");
                 }
             }
@@ -226,6 +240,23 @@ impl Teams {
                     message_id: id.into(),
                 },
                 reply_channel: channel.clone(),
+                context: MessageContext {
+                    channel_name: activity
+                        .pointer("/channelData/channel/name")
+                        .and_then(Value::as_str)
+                        .or_else(|| {
+                            activity
+                                .pointer("/conversation/name")
+                                .and_then(Value::as_str)
+                        })
+                        .map(str::to_owned),
+                    sent_at: activity
+                        .pointer("/timestamp")
+                        .and_then(Value::as_str)
+                        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                        .map(|time| time.with_timezone(&Utc)),
+                    mentions,
+                },
                 sender: Sender {
                     id: if self.own_id(sender_id) {
                         self.config.app_id.clone()

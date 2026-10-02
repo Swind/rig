@@ -16,6 +16,11 @@ and pass the returned events through gateway admission and dispatch. Advance
 and persist the returned offset after dispatch. Telegram retains updates for
 at most 24 hours. Polling and webhooks cannot consume updates simultaneously.
 
+Inbound context includes a supplied chat title or username and the message
+timestamp. Structured `text_mention` entities include mentioned users; ordinary
+username mentions do not identify a user in the payload. Missing display names
+fall back to platform IDs.
+
 Messages preserve chat IDs and forum topic IDs. Mentions use Telegram UTF-16
 entity offsets. Photos, documents, voice and audio are downloaded in `prepare`
 after Gate admission. Downloads require HTTPS from the configured API host,

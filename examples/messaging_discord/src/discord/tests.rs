@@ -17,6 +17,23 @@ fn parent_category_is_not_a_thread() -> Result<(), Box<dyn std::error::Error>> {
     let input = normalize(&msg, &ch, UserId::new(500));
     assert!(!input.is_thread);
     assert!(input.mentions_bot);
+    assert_eq!(input.context.channel_name.as_deref(), Some("room"));
+    assert_eq!(
+        input.context.sent_at.map(|time| time.to_rfc3339()),
+        Some("2026-09-30T00:00:00+00:00".into())
+    );
+    assert_eq!(
+        input
+            .context
+            .mentions
+            .first()
+            .map(|sender| sender.id.as_str()),
+        Some("500")
+    );
+    assert_eq!(
+        input.context.mentions.first().map(|sender| sender.is_bot),
+        Some(true)
+    );
     assert_eq!(input.text, "hello");
     assert!(input.message.channel.thread_id.is_none());
     assert!(rig::messaging::Gate::default().allows(&input, "500"));

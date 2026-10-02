@@ -124,10 +124,7 @@ impl ChatRouter {
 }
 
 fn build_prompt(m: &Inbound, cfg: &ChatConfig) -> Message {
-    let mut content = vec![UserContent::text(format!(
-        "[{} ({})]\n{}",
-        m.sender.name, m.sender.id, m.text
-    ))];
+    let mut content = vec![UserContent::text(m.prompt_text())];
     for attachment in &m.attachments {
         let media = if cfg.attachment_mime_types.contains(&attachment.mime) {
             MediaType::from_mime_type(&attachment.mime)

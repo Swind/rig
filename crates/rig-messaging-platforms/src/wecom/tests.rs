@@ -70,7 +70,7 @@ fn request(adapter: &WeCom, value: &str, method: Method) -> Result<WebhookReques
 #[tokio::test]
 async fn encrypted_callback_identity_and_challenge() -> Result<(), Error> {
     let adapter = adapter()?;
-    let xml = "<xml><ToUserName><![CDATA[corp]]></ToUserName><FromUserName>alice</FromUserName><MsgType>text</MsgType><Content><![CDATA[Hello & 世界]]></Content><MsgId>123</MsgId><AgentID>42</AgentID></xml>";
+    let xml = "<xml><ToUserName><![CDATA[corp]]></ToUserName><FromUserName>alice</FromUserName><CreateTime>1600000000</CreateTime><MsgType>text</MsgType><Content><![CDATA[Hello & 世界]]></Content><MsgId>123</MsgId><AgentID>42</AgentID></xml>";
     let value = encrypted(&adapter, xml, "corp")?;
     let response = adapter
         .receive(request(&adapter, &value, Method::POST)?)
@@ -79,10 +79,28 @@ async fn encrypted_callback_identity_and_challenge() -> Result<(), Error> {
     let inbound = &response.events[0].inbound;
     assert_eq!(inbound.text, "Hello & 世界");
     assert_eq!(inbound.sender.id, "alice");
+    assert_eq!(inbound.context.channel_name, None);
+    assert_eq!(
+        inbound.context.sent_at.map(|time| time.timestamp()),
+        Some(1600000000)
+    );
+    assert!(inbound.context.mentions.is_empty());
     assert_eq!(inbound.message.message_id, "123");
     assert!(inbound.is_dm);
     assert!(!inbound.is_thread);
     assert_eq!(inbound.message.channel.scope_id.as_deref(), Some("corp"));
+    let malformed_time = "<xml><ToUserName><![CDATA[corp]]></ToUserName><FromUserName>alice</FromUserName><CreateTime>unknown</CreateTime><MsgType>text</MsgType><Content><![CDATA[Still accepted]]></Content><MsgId>124</MsgId><AgentID>42</AgentID></xml>";
+    let value = encrypted(&adapter, malformed_time, "corp")?;
+    let response = adapter
+        .receive(request(&adapter, &value, Method::POST)?)
+        .await?;
+    let inbound = &response
+        .events
+        .first()
+        .ok_or(Error::Invalid("test event"))?
+        .inbound;
+    assert_eq!(inbound.text, "Still accepted");
+    assert!(inbound.context.sent_at.is_none());
     let challenge = encrypted(&adapter, "challenge", "corp")?;
     assert_eq!(
         adapter

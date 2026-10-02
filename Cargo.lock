@@ -7867,6 +7867,7 @@ dependencies = [
 name = "messaging_slack"
 version = "0.42.0"
 dependencies = [
+ "chrono",
  "dotenvy",
  "futures",
  "rig-agent",
@@ -11044,6 +11045,7 @@ name = "rig-messaging"
 version = "0.42.0"
 dependencies = [
  "bytes",
+ "chrono",
  "fastrand",
  "futures",
  "pulldown-cmark",

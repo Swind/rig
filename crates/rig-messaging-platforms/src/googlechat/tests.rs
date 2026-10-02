@@ -39,7 +39,7 @@ fn request(token: &str) -> Result<WebhookRequest, Error> {
             .parse()
             .map_err(|_| Error::Invalid("test header"))?,
     );
-    let body = json!({"type":"MESSAGE","space":{"name":"spaces/room","type":"ROOM"},"message":{"name":"spaces/room/messages/input","text":"<users/bot> hi","argumentText":"hi","threadReply":true,"sender":{"name":"users/alice","displayName":"Alice","type":"HUMAN"},"thread":{"name":"spaces/room/threads/topic"},"annotations":[{"userMention":{"user":{"name":"users/bot"}}}]}});
+    let body = json!({"type":"MESSAGE","space":{"name":"spaces/room","type":"ROOM","displayName":"Room"},"message":{"name":"spaces/room/messages/input","createTime":"2026-10-01T00:00:00Z","text":"<users/bot> hi","argumentText":"hi","threadReply":true,"sender":{"name":"users/alice","displayName":"Alice","type":"HUMAN"},"thread":{"name":"spaces/room/threads/topic"},"annotations":[{"userMention":{"user":{"name":"users/bot","displayName":"Rig","type":"BOT"}}},{"userMention":{"user":{"name":"users/other","displayName":"Other","type":"HUMAN"}}}]}});
     Ok(WebhookRequest {
         method: Method::POST,
         headers,
@@ -58,6 +58,13 @@ async fn valid_signature_normalizes_and_wrong_signer_or_audience_fail() -> Resul
         .ok_or(Error::Invalid("test event"))?
         .inbound;
     assert_eq!(inbound.sender.id, "users/alice");
+    assert_eq!(inbound.context.channel_name.as_deref(), Some("Room"));
+    assert_eq!(
+        inbound.context.sent_at.map(|time| time.to_rfc3339()),
+        Some("2026-10-01T00:00:00+00:00".into())
+    );
+    assert_eq!(inbound.context.mentions.len(), 2);
+    assert_eq!(inbound.context.mentions[0].name, "Rig");
     assert_eq!(inbound.text, "hi");
     assert!(inbound.mentions_bot);
     assert!(inbound.is_thread);

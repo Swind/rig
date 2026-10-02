@@ -6,7 +6,7 @@
 use rig::{
     messaging::{
         Attachment, AttachmentSource, ChannelRef, ChatAdapter, ChatError, ChatRouter, Inbound,
-        MessageRef, Sender, format::shorten_thread_name,
+        MessageContext, MessageRef, Sender, format::shorten_thread_name,
     },
     wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync},
 };
@@ -168,6 +168,27 @@ fn normalize(msg: &Message, channel: &Channel, bot_id: UserId) -> Inbound {
         is_dm: matches!(channel, Channel::Private(_)),
         is_thread: matches!(channel,Channel::Guild(gc) if gc.thread_metadata.is_some()),
         mentions_bot: msg.mentions_user_id(bot_id),
+        context: MessageContext {
+            channel_name: match channel {
+                Channel::Guild(channel) => Some(channel.name.clone()),
+                _ => None,
+            },
+            sent_at: Some(*msg.timestamp),
+            mentions: msg
+                .mentions
+                .iter()
+                .map(|user| Sender {
+                    id: user.id.to_string(),
+                    name: user
+                        .global_name
+                        .as_ref()
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(&user.name)
+                        .clone(),
+                    is_bot: user.bot,
+                })
+                .collect(),
+        },
     }
 }
 fn use_thread(input: &mut Inbound, thread: &GuildChannel) {

@@ -2,8 +2,9 @@ use super::*;
 use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
+use chrono::DateTime;
 use http::StatusCode;
-use rig_messaging::{Attachment, AttachmentSource, Sender};
+use rig_messaging::{Attachment, AttachmentSource, MessageContext, Sender};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -119,6 +120,7 @@ impl Feishu {
             _ => String::new(),
         };
         let mut mentions_bot = false;
+        let mut mentioned_senders = Vec::new();
         if let Some(mentions) = message
             .pointer("/mentions")
             .unwrap_or(&serde_json::Value::Null)
@@ -128,6 +130,24 @@ impl Feishu {
                 let id = mention.pointer("/id/open_id").and_then(Value::as_str);
                 let ours = id == Some(self.bot_id.as_str());
                 mentions_bot |= ours;
+                if let Some(id) = mention
+                    .pointer("/id/open_id")
+                    .or_else(|| mention.pointer("/id/user_id"))
+                    .or_else(|| mention.pointer("/id/union_id"))
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
+                    mentioned_senders.push(Sender {
+                        id: id.to_owned(),
+                        name: mention
+                            .pointer("/name")
+                            .and_then(Value::as_str)
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or(id)
+                            .to_owned(),
+                        is_bot: id == self.bot_id,
+                    });
+                }
                 if let Some(key) = mention
                     .pointer("/key")
                     .unwrap_or(&serde_json::Value::Null)
@@ -177,6 +197,14 @@ impl Feishu {
                 message_id: message_id.into(),
             },
             reply_channel: channel,
+            context: MessageContext {
+                channel_name: None,
+                sent_at: message
+                    .pointer("/create_time")
+                    .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
+                    .and_then(DateTime::from_timestamp_millis),
+                mentions: mentioned_senders,
+            },
             sender: Sender {
                 id: sender.into(),
                 name: sender.into(),

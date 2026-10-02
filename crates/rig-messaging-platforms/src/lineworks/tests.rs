@@ -53,6 +53,12 @@ async fn verified_identity_and_mention_boundaries() -> Result<(), Error> {
         .first()
         .ok_or(Error::Invalid("test event"))?;
     assert_eq!(event.inbound.sender.id, "alice");
+    assert_eq!(event.inbound.context.channel_name, None);
+    assert_eq!(
+        event.inbound.context.sent_at.map(|time| time.to_rfc3339()),
+        Some("2026-10-01T00:00:00+00:00".into())
+    );
+    assert!(event.inbound.context.mentions.is_empty());
     assert!(event.inbound.mentions_bot);
     assert!(!event.inbound.is_dm);
     assert_eq!(event.inbound.message.channel.scope_id.as_deref(), Some("5"));

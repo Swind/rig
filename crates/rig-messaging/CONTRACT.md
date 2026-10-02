@@ -132,8 +132,12 @@ Agent history 的讀取與追加由 `rig-agent` 處理。Router 不自行追加�
 
 ## 5. Prompt 與附件
 
-文字輸入使用 `[sender name (sender id)]` 前綴，讓共用 thread 的發言者可辨識。
-平台 channel、thread 與 session key 不會額外注入 prompt；sender name 與 id 會提供給模型。
+文字輸入由 `Inbound::prompt_text` 統一組裝，包含 platform、原始 channel 名稱與 id、
+sender 名稱與 id。`MessageContext` 可補上 UTC 訊息時間與被 mention 的使用者名稱／id。
+名稱缺少時使用 id；沒有時間或 mentions 時省略對應行。本文維持原始內容，metadata
+內的換行則跳脫以維持 header 邊界。Thread、scope 與 session key 不額外注入 prompt。
+Display metadata 是 user content，不能作為 authorization；Gate 與 session identity
+仍使用原本的穩定 id。各平台不一定提供所有名稱，詳見平台 README 的支援表。
 
 `Attachment` 包含 filename、MIME、可選 size 與 `Bytes` 或 `Url` payload。
 `ChatConfig::attachment_mime_types` 是精確 MIME allowlist，預設為空。

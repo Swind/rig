@@ -14,10 +14,12 @@
 use crate::{Error, Http, Incoming, Platform, WebhookRequest, WebhookResponse, auth};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
+use chrono::DateTime;
 use http::{Method, StatusCode};
 use rig_core::wasm_compat::WasmBoxedFuture;
 use rig_messaging::{
-    Attachment, AttachmentSource, ChannelRef, ChatAdapter, ChatError, Inbound, MessageRef, Sender,
+    Attachment, AttachmentSource, ChannelRef, ChatAdapter, ChatError, Inbound, MessageContext,
+    MessageRef, Sender,
 };
 use serde_json::{Value, json};
 use std::{
@@ -114,6 +116,25 @@ impl Line {
             .any(|mention| {
                 mention.pointer("/isSelf").unwrap_or(&Value::Null).as_bool() == Some(true)
             });
+        let mentions = message
+            .pointer("/mention/mentionees")
+            .unwrap_or(&Value::Null)
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|mention| {
+                let id = mention.pointer("/userId")?.as_str()?.to_owned();
+                Some(Sender {
+                    name: id.clone(),
+                    id,
+                    is_bot: mention.pointer("/isSelf").and_then(Value::as_bool) == Some(true),
+                })
+            })
+            .collect();
+        let sent_at = event
+            .pointer("/timestamp")
+            .and_then(Value::as_i64)
+            .and_then(DateTime::from_timestamp_millis);
         Ok(Some(Incoming {
             inbound: Inbound {
                 message: MessageRef {
@@ -121,6 +142,11 @@ impl Line {
                     message_id: field(message, "id")?.into(),
                 },
                 reply_channel: channel,
+                context: MessageContext {
+                    channel_name: None,
+                    sent_at,
+                    mentions,
+                },
                 sender: Sender {
                     id: user_id.into(),
                     name: user_id.into(),

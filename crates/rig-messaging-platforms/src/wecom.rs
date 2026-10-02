@@ -7,9 +7,11 @@ use ::http::Method;
 use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::NoPadding};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
+use chrono::DateTime;
 use rig_core::wasm_compat::WasmBoxedFuture;
 use rig_messaging::{
-    Attachment, AttachmentSource, ChannelRef, ChatAdapter, ChatError, Inbound, MessageRef, Sender,
+    Attachment, AttachmentSource, ChannelRef, ChatAdapter, ChatError, Inbound, MessageContext,
+    MessageRef, Sender,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -261,6 +263,8 @@ struct Callback {
     kind: String,
     #[serde(rename = "MsgId", default)]
     id: String,
+    #[serde(rename = "CreateTime")]
+    create_time: Option<String>,
     #[serde(rename = "Content", default)]
     text: String,
     #[serde(rename = "MediaId", default)]
@@ -323,6 +327,14 @@ impl Platform for WeCom {
                         message_id: event.id,
                     },
                     reply_channel: channel,
+                    context: MessageContext {
+                        channel_name: None,
+                        sent_at: event
+                            .create_time
+                            .and_then(|seconds| seconds.parse::<i64>().ok())
+                            .and_then(|seconds| DateTime::from_timestamp(seconds, 0)),
+                        mentions: Vec::new(),
+                    },
                     sender: Sender {
                         id: event.user.clone(),
                         name: event.user,

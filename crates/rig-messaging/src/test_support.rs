@@ -208,6 +208,7 @@ pub(crate) fn inbound(text: &str) -> Inbound {
             name: "alice".into(),
             is_bot: false,
         },
+        context: Default::default(),
         text: text.into(),
         attachments: vec![],
         is_dm: true,

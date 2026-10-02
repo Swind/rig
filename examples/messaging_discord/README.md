@@ -14,6 +14,9 @@ threads and DMs need no mention. History is in memory and shared by everyone in
 the same thread. Reactions attach to the original triggering message. Responses
 suppress mentions. Attachments are bounded to 10 MiB total per input, checked
 before downloading and while reading the response.
+Inbound context includes the message timestamp, guild channel name, and users
+present in Discord's structured mention list. Private messages have no channel
+display name.
 
 Optional comma-separated `DISCORD_ALLOWED_CHANNELS` and `DISCORD_ALLOWED_USERS`
 restrict admission. Channel ids match original channels; list thread ids for

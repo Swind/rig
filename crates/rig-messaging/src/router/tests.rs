@@ -95,7 +95,7 @@ async fn same_session_waits_and_loads_complete_history() -> Result<(), Box<dyn s
     assert!(
         requests[1]
             .chat_history
-            .contains(&Message::user("[alice (alice-id)]\nfirst"))
+            .contains(&Message::user(inbound("first").prompt_text()))
     );
     assert_eq!(
         memory
@@ -210,7 +210,7 @@ async fn rejected_input_performs_no_platform_or_model_operations() -> Result<(),
 }
 
 #[test]
-fn prompt_keeps_routing_out_and_converts_only_supported_media() {
+fn prompt_includes_display_context_and_converts_only_supported_media() {
     let mut m = inbound("hello");
     m.attachments = vec![
         Attachment {
@@ -236,7 +236,7 @@ fn prompt_keeps_routing_out_and_converts_only_supported_media() {
         _ => Vec::new(),
     };
     assert_eq!(content.len(), 3);
-    assert_eq!(content[0], UserContent::text("[alice (alice-id)]\nhello"));
+    assert_eq!(content[0], UserContent::text(m.prompt_text()));
     assert!(
         matches!(&content[1],UserContent::Image(image) if matches!(&image.data,rig_core::message::DocumentSourceKind::Raw(data) if data==b"png"))
     );
@@ -283,7 +283,7 @@ async fn independent_session_runs_while_first_is_waiting() -> Result<(), Box<dyn
     assert_eq!(model.request_count(), 2);
     assert_eq!(
         model.requests()[1].chat_history,
-        vec![Message::user("[alice (alice-id)]\nsecond")]
+        vec![Message::user(inbound("second").prompt_text())]
     );
     release.notify_one();
     first.await??;

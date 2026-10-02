@@ -64,6 +64,19 @@ pub struct Sender {
     pub is_bot: bool,
 }
 
+/// Optional display context supplied by platform ingress.
+///
+/// Names and mentions are descriptive data. Routing, authorization, and memory keys use IDs.
+#[derive(Debug, Clone, Default)]
+pub struct MessageContext {
+    /// Display name of the original message's channel, when available.
+    pub channel_name: Option<String>,
+    /// Original message time normalized to UTC, when supplied by the platform.
+    pub sent_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Mentioned users with their platform IDs and available display names.
+    pub mentions: Vec<Sender>,
+}
+
 /// Normalized input retaining the original reaction target and reply destination.
 #[derive(Debug, Clone)]
 pub struct Inbound {
@@ -73,6 +86,8 @@ pub struct Inbound {
     pub reply_channel: ChannelRef,
     /// Sender identity.
     pub sender: Sender,
+    /// Display context included in the model's user message.
+    pub context: MessageContext,
     /// User text.
     pub text: String,
     /// Attached media.
@@ -83,6 +98,63 @@ pub struct Inbound {
     pub is_thread: bool,
     /// Whether the original message mentions the bot.
     pub mentions_bot: bool,
+}
+
+impl Inbound {
+    /// Render platform, channel, sender, optional UTC time and mentions before the message text.
+    ///
+    /// Missing names fall back to stable IDs. Metadata stays on separate header lines while the
+    /// original text is preserved. This representation is user content, not authorization data.
+    pub fn prompt_text(&self) -> String {
+        let channel = &self.message.channel;
+        let mut lines = vec![
+            format!("Platform: {}", header_value(&channel.platform)),
+            format!(
+                "Channel: {}",
+                display_identity(self.context.channel_name.as_deref(), &channel.channel_id)
+            ),
+            format!(
+                "Sender: {}",
+                display_identity(Some(&self.sender.name), &self.sender.id)
+            ),
+        ];
+        if let Some(sent_at) = self.context.sent_at {
+            lines.push(format!(
+                "Time: {}",
+                sent_at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+            ));
+        }
+        if !self.context.mentions.is_empty() {
+            let mut seen = std::collections::HashSet::new();
+            let mentions = self
+                .context
+                .mentions
+                .iter()
+                .filter(|sender| seen.insert(sender.id.as_str()))
+                .map(|sender| display_identity(Some(&sender.name), &sender.id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("Mentions: {mentions}"));
+        }
+        format!("{}\n\n{}", lines.join("\n"), self.text)
+    }
+}
+
+fn display_identity(name: Option<&str>, id: &str) -> String {
+    match name
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != id)
+    {
+        Some(name) => format!("{} ({})", header_value(name), header_value(id)),
+        None => header_value(id),
+    }
+}
+
+fn header_value(value: &str) -> String {
+    value
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
 }
 
 /// Attachment metadata and a deferred or already downloaded payload.

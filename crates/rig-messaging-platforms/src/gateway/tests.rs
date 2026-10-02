@@ -93,6 +93,7 @@ fn event(mention: bool) -> Incoming {
             is_dm: false,
             is_thread: false,
             mentions_bot: mention,
+            context: rig_messaging::MessageContext::default(),
         },
         payload: serde_json::Value::Null,
     }

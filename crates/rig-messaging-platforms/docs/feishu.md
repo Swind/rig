@@ -79,6 +79,10 @@ Official protocol references: [message APIs](https://open.feishu.cn/document/ser
 [CardKit APIs](https://open.feishu.cn/document/cardkit-v1/card/create), and the
 [official long connection SDK](https://github.com/larksuite/oapi-sdk-python/blob/v2_main/lark_oapi/ws/client.py).
 
+Inbound context copies the message creation time and structured mentions with
+their supplied user IDs and names. Events do not supply a chat display name;
+missing mention names fall back to the supplied user ID.
+
 ```sh
 cargo nextest run --locked --profile local -p rig-messaging-platforms --features feishu feishu
 ```

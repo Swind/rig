@@ -6,7 +6,8 @@ Set `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`. The example automatically loads
 OpenCode Go as below. Enable Socket Mode and create an
 app-level token with `connections:write`. Install a bot with `chat:write`,
 `reactions:write`, `channels:history`, `groups:history`, `im:history` and
-`files:read` scopes. Subscribe to `message.channels`, `message.groups` and
+`files:read`, `users:read`, `channels:read`, `groups:read`, `im:read` and
+`mpim:read` scopes. Subscribe to `message.channels`, `message.groups` and
 `message.im`. Invite the bot to the channels it should handle.
 
 ```sh
@@ -68,7 +69,13 @@ performed.
 A channel mention starts a reply thread. Follow-ups in threads and DMs need no
 mention. Conversation history is in memory and shared by everyone in the same
 thread. Reactions attach to the original input, including mentions outside a
-thread. Sender names use Slack user ids without an extra profile lookup.
+thread. After channel admission, the adapter resolves channel and user display
+names and mentioned users through Slack's Web API. Results and failures are
+cached in memory for a bounded period. Non-bot Slack mention markup stays in
+the message text; resolved mention names are added as prompt context. The bot's
+own mention is removed before the message reaches the model. Metadata enrichment
+has a five-second budget and resolves at most 16 mentioned users per message;
+remaining mentions keep their IDs in the prompt context.
 Optional comma-separated `SLACK_ALLOWED_CHANNELS` and `SLACK_ALLOWED_USERS`
 restrict original channel ids and sender ids. Bot messages are ignored.
 

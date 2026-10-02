@@ -13,10 +13,12 @@
 
 use crate::{Error, Http, Incoming, Platform, WebhookRequest, WebhookResponse};
 use bytes::Bytes;
+use chrono::DateTime;
 use http::{Method, StatusCode};
 use rig_core::wasm_compat::WasmBoxedFuture;
 use rig_messaging::{
-    Attachment, AttachmentSource, ChannelRef, ChatAdapter, ChatError, Inbound, MessageRef, Sender,
+    Attachment, AttachmentSource, ChannelRef, ChatAdapter, ChatError, Inbound, MessageContext,
+    MessageRef, Sender,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -235,10 +237,11 @@ impl Telegram {
             return Ok(None);
         };
         let sender_id = integer_id(from, "id")?;
+        let chat = message.pointer("/chat").unwrap_or(&Value::Null);
         let channel = ChannelRef {
             platform: "telegram".into(),
             scope_id: Some(self.config.bot_id.clone()),
-            channel_id: integer_id(message.pointer("/chat").unwrap_or(&Value::Null), "id")?,
+            channel_id: integer_id(chat, "id")?,
             thread_id: message
                 .get("message_thread_id")
                 .map(|_| integer_id(message, "message_thread_id"))
@@ -301,6 +304,54 @@ impl Telegram {
                     _ => false,
                 },
             );
+        let mentions: Vec<Sender> = message
+            .pointer("/entities")
+            .unwrap_or(&Value::Null)
+            .as_array()
+            .into_iter()
+            .flatten()
+            .chain(
+                message
+                    .pointer("/caption_entities")
+                    .unwrap_or(&Value::Null)
+                    .as_array()
+                    .into_iter()
+                    .flatten(),
+            )
+            .filter(|entity| {
+                entity.pointer("/type").and_then(Value::as_str) == Some("text_mention")
+            })
+            .filter_map(|entity| {
+                let user = entity.pointer("/user")?;
+                let id = integer_id(user, "id").ok()?;
+                let display_name = [
+                    user.pointer("/first_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                    user.pointer("/last_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                ]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+                let name = if display_name.is_empty() {
+                    user.pointer("/username")
+                        .and_then(Value::as_str)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(&id)
+                        .to_owned()
+                } else {
+                    display_name
+                };
+                Some(Sender {
+                    id,
+                    name,
+                    is_bot: user.pointer("/is_bot").and_then(Value::as_bool) == Some(true),
+                })
+            })
+            .collect();
         let has_media = ["photo", "document", "voice", "audio"]
             .iter()
             .any(|key| message.get(key).is_some());
@@ -321,6 +372,33 @@ impl Telegram {
         .filter(|name| !name.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
+        let name = if name.is_empty() {
+            from.pointer("/username")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&sender_id)
+                .to_owned()
+        } else {
+            name
+        };
+        let chat_name = chat
+            .pointer("/title")
+            .or_else(|| chat.pointer("/username"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                let first = chat.pointer("/first_name").and_then(Value::as_str)?;
+                let last = chat
+                    .pointer("/last_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                Some(if last.is_empty() {
+                    first.to_owned()
+                } else {
+                    format!("{first} {last}")
+                })
+            });
         Ok(Some(Incoming {
             inbound: Inbound {
                 message: MessageRef {
@@ -328,6 +406,14 @@ impl Telegram {
                     message_id: integer_id(message, "message_id")?,
                 },
                 reply_channel: channel.clone(),
+                context: MessageContext {
+                    channel_name: chat_name,
+                    sent_at: message
+                        .pointer("/date")
+                        .and_then(Value::as_i64)
+                        .and_then(|seconds| DateTime::from_timestamp(seconds, 0)),
+                    mentions,
+                },
                 sender: Sender {
                     id: sender_id,
                     name,

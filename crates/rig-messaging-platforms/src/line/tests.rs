@@ -21,11 +21,19 @@ fn adapter() -> Result<Line, Error> {
 #[test]
 fn group_identity_and_native_self_mention() -> Result<(), Error> {
     let bot = adapter()?;
-    let event = bot.normalize(&json!({"type":"message","source":{"type":"group","groupId":"group","userId":"user"},"message":{"type":"text","id":"7","text":"hello","mention":{"mentionees":[{"isSelf":true}]}}}))?.ok_or(Error::Invalid("test event"))?;
+    let event = bot.normalize(&json!({"type":"message","timestamp":1600000000000_i64,"source":{"type":"group","groupId":"group","userId":"user"},"message":{"type":"text","id":"7","text":"hello","mention":{"mentionees":[{"userId":"bot-id","isSelf":true},{"userId":"other-id","isSelf":false}]}}}))?.ok_or(Error::Invalid("test event"))?;
     assert_eq!(event.inbound.message.channel.channel_id, "group");
     assert_eq!(event.inbound.sender.id, "user");
     assert!(event.inbound.mentions_bot);
     assert!(!event.inbound.is_dm);
+    assert_eq!(event.inbound.context.channel_name, None);
+    assert_eq!(
+        event.inbound.context.sent_at.map(|time| time.timestamp()),
+        Some(1600000000)
+    );
+    assert_eq!(event.inbound.context.mentions.len(), 2);
+    assert_eq!(event.inbound.context.mentions[1].id, "other-id");
+    assert_eq!(event.inbound.context.mentions[1].name, "other-id");
     assert!(bot.normalize(&json!({"type":"message","source":{"type":"group","groupId":"group"},"message":{"type":"text","id":"7","text":"hello"}}))?.is_none());
     Ok(())
 }

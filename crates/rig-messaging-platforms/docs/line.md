@@ -17,6 +17,10 @@ group media. Image and audio downloads happen after admission and use bearer
 credentials only on the configured HTTPS data host, with redirects disabled
 and a finite byte limit. External-provider media is rejected.
 
+Inbound context includes the event timestamp and structured mentions that carry
+a user ID. LINE does not include a group or room display name in these events;
+mention and sender names fall back to stable IDs when absent.
+
 Reply tokens retain verified receive time and are scoped to the exact
 triggering message by gateway dispatch. Each token is consumed at most once.
 Tokens older than 55 seconds use push. An explicit `Invalid reply token`

@@ -43,3 +43,7 @@ References: [request verification](https://developers.google.com/workspace/chat/
 [add-on HTTP authentication](https://developers.google.com/workspace/add-ons/guides/alternate-runtimes),
 [message creation](https://developers.google.com/workspace/chat/api/reference/rest/v1/spaces.messages/create),
 and [media download](https://developers.google.com/workspace/chat/api/reference/rest/v1/media/download).
+
+Inbound context copies the message creation time, space display name when
+present, and annotated user mentions. Missing mention display names fall back
+to the user's resource name.

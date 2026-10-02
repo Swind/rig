@@ -16,6 +16,10 @@ addresses. Media is fetched from the fixed corporate API after admission;
 callback image URLs are never fetched. Access tokens are cached and rejected
 tokens refresh once. Binary responses and text responses are bounded by the
 configured HTTP limit, with additional 10 MiB image and 20 MiB file ceilings.
+
+Inbound context copies `CreateTime` as the event timestamp. Callback messages do
+not supply a channel display name or structured mentions; sender names fall
+back to the corporate user ID.
 The caller must configure allowed attachment MIME types in `ChatConfig`.
 
 Text sending returns real `msgid` values. Recall uses the message recall API.

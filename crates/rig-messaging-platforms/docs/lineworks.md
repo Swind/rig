@@ -36,3 +36,7 @@ Protocol references: [callbacks](https://developers.worksmobile.com/en/docs/bot-
 [message events](https://developers.worksmobile.com/en/docs/bot-callback-message),
 [service-account JWT](https://developers.worksmobile.com/en/docs/auth-jwt), and
 [channel delivery](https://developers.worksmobile.com/en/docs/bot-channel-message-send).
+
+Inbound context copies `issuedTime` as the event timestamp. Callback events do
+not supply a channel display name or structured mentions; sender names fall
+back to the signed user ID.

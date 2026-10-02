@@ -30,6 +30,10 @@ fn normalization_preserves_reactions_and_shares_thread_identity() -> Result<(), 
     assert!(!first.is_thread);
     assert!(second.is_thread);
     assert_eq!(first.text, "hello");
+    assert_eq!(
+        first.context.sent_at.map(|time| time.timestamp()),
+        Some(100)
+    );
     let dm =
         normalize(&payload("D1", "100.1", None), &identity()).ok_or(Error::Missing("input"))?;
     assert!(dm.is_dm);
@@ -188,6 +192,169 @@ fn adapter(api: String) -> Result<SlackAdapter, Error> {
     let mut adapter = SlackAdapter::new("offline-bot-token".into())?;
     adapter.api = api;
     Ok(adapter)
+}
+
+#[tokio::test]
+async fn metadata_cache_expires_entries_and_evicts_at_its_capacity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let adapter = adapter("http://127.0.0.1:1".into())?;
+    adapter.metadata.lock().await.insert(
+        "channel:expired".into(),
+        CachedMetadata {
+            value: Metadata::Channel("expired".into()),
+            expires: Instant::now() - Duration::from_secs(1),
+        },
+    );
+    assert!(adapter.cached_metadata("channel:expired").await.is_none());
+    for index in 0..METADATA_CACHE_LIMIT {
+        adapter
+            .cache_metadata(
+                format!("channel:{index}"),
+                Metadata::Channel(index.to_string()),
+                METADATA_TTL,
+            )
+            .await;
+    }
+    adapter
+        .cache_metadata(
+            "channel:last".into(),
+            Metadata::Channel("last".into()),
+            METADATA_TTL,
+        )
+        .await;
+    assert_eq!(adapter.metadata.lock().await.len(), METADATA_CACHE_LIMIT);
+    assert!(adapter.cached_metadata("channel:last").await.is_some());
+    assert!(adapter.cached_metadata("channel:0").await.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn metadata_lookups_resolve_names_and_cache_results() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (url, server) = server(vec![
+        (json!({"ok":true,"channel":{"name":"general"}}).to_string(), true),
+        (json!({"ok":true,"user":{"name":"alice","is_bot":false,"profile":{"display_name":"Alice"}}}).to_string(), true),
+        (json!({"ok":true,"user":{"name":"bob","is_bot":false,"profile":{"display_name":"Bob"}}}).to_string(), true),
+    ]).await?;
+    let adapter = adapter(url)?;
+    let mut event = payload("C1", "100.125", None);
+    event["event"]["text"] = json!("<@UBOT> hi <@U2> and <@U2|Bob>");
+    let mut first = normalize(&event, &identity()).ok_or(Error::Missing("input"))?;
+    adapter.enrich(&mut first, "UBOT").await;
+    assert_eq!(first.text, "hi <@U2> and <@U2|Bob>");
+    assert_eq!(first.context.channel_name.as_deref(), Some("general"));
+    assert_eq!(first.sender.name, "Alice");
+    assert_eq!(first.context.mentions.len(), 1);
+    assert_eq!(first.context.mentions[0].name, "Bob");
+    let mut second = normalize(&event, &identity()).ok_or(Error::Missing("input"))?;
+    adapter.enrich(&mut second, "UBOT").await;
+    let requests = tokio::time::timeout(Duration::from_secs(5), server).await???;
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[0]
+            .0
+            .starts_with("GET /conversations.info?channel=C1")
+    );
+    assert!(requests[1].0.starts_with("GET /users.info?user=U1"));
+    assert!(requests[2].0.starts_with("GET /users.info?user=U2"));
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.2 == "Bearer offline-bot-token")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_metadata_lookups_fall_back_to_ids_and_are_cached()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (url, server) = server(vec![
+        (
+            json!({"ok":false,"error":"missing_scope"}).to_string(),
+            true,
+        ),
+        (
+            json!({"ok":false,"error":"user_not_found"}).to_string(),
+            true,
+        ),
+        (
+            json!({"ok":false,"error":"user_not_found"}).to_string(),
+            true,
+        ),
+    ])
+    .await?;
+    let adapter = adapter(url)?;
+    let mut event = payload("C1", "100", None);
+    event["event"]["text"] = json!("hello <@U2>");
+    for _ in 0..2 {
+        let mut input = normalize(&event, &identity()).ok_or(Error::Missing("input"))?;
+        adapter.enrich(&mut input, "UBOT").await;
+        assert_eq!(input.context.channel_name.as_deref(), Some("C1"));
+        assert_eq!(input.sender.name, "U1");
+        assert_eq!(input.context.mentions[0].name, "U2");
+    }
+    let requests = tokio::time::timeout(Duration::from_secs(5), server).await???;
+    assert_eq!(requests.len(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mention_resolution_is_bounded_and_keeps_unresolved_ids()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mentions = (2..=20)
+        .map(|index| format!("<@U{index}>"))
+        .collect::<Vec<_>>();
+    let input_text = mentions.join(" ");
+    let responses = (2..2 + MAX_MENTION_LOOKUPS)
+        .map(|index| {
+            (
+                json!({"ok":true,"user":{"name":format!("person{index}"),"is_bot":false}})
+                    .to_string(),
+                true,
+            )
+        })
+        .collect();
+    let (url, server) = server(responses).await?;
+    let adapter = adapter(url)?;
+    let mut event = payload("C1", "100", None);
+    event["event"]["text"] = json!(input_text);
+    let mut input = normalize(&event, &identity()).ok_or(Error::Missing("input"))?;
+    adapter
+        .add_mentions(
+            &mut input,
+            "UBOT",
+            Instant::now() + METADATA_ENRICHMENT_BUDGET,
+        )
+        .await;
+    let requests = tokio::time::timeout(Duration::from_secs(5), server).await???;
+    assert_eq!(requests.len(), MAX_MENTION_LOOKUPS);
+    assert_eq!(input.context.mentions.len(), mentions.len());
+    assert_eq!(input.context.mentions[MAX_MENTION_LOOKUPS].id, "U18");
+    assert_eq!(input.context.mentions[MAX_MENTION_LOOKUPS].name, "U18");
+    Ok(())
+}
+
+#[tokio::test]
+async fn expired_enrichment_budget_keeps_mentions_without_api_requests()
+-> Result<(), Box<dyn std::error::Error>> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = format!("http://{}", listener.local_addr()?);
+    let adapter = adapter(address)?;
+    let mut event = payload("C1", "100", None);
+    event["event"]["text"] = json!("<@U2> <@U3>");
+    let mut input = normalize(&event, &identity()).ok_or(Error::Missing("input"))?;
+    adapter
+        .add_mentions(&mut input, "UBOT", Instant::now() - Duration::from_secs(1))
+        .await;
+    assert_eq!(input.context.mentions.len(), 2);
+    assert_eq!(input.context.mentions[0].name, "U2");
+    assert_eq!(input.context.mentions[1].name, "U3");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -371,8 +538,10 @@ async fn socket_acknowledges_all_envelopes_and_deduplicates_without_waiting_for_
 #[tokio::test]
 async fn rejected_input_does_not_download_or_call_model() -> Result<(), Box<dyn std::error::Error>>
 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = format!("http://{}", listener.local_addr()?);
     let (handler, model) = handler(
-        adapter("http://127.0.0.1:1".into())?,
+        adapter(address)?,
         rig_messaging::Gate {
             allowed_users: Some(HashSet::from(["other".into()])),
             ..Default::default()
@@ -383,6 +552,11 @@ async fn rejected_input_does_not_download_or_call_model() -> Result<(), Box<dyn 
         json!([{"name":"secret","url_private":"https://files.slack.com/file","size":4}]);
     handler.process(event).await?;
     assert_eq!(model.request_count(), 0);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
     Ok(())
 }
 
@@ -407,9 +581,19 @@ async fn two_slack_turns_share_history_and_preserve_native_tables()
     let mut cfg = rig_messaging::ChatConfig::default();
     cfg.reactions.enabled = false;
     let (url, server) = server(
-        (0..4)
-            .map(|_| (json!({"ok":true,"ts":"200"}).to_string(), true))
-            .collect(),
+        [
+            (
+                json!({"ok":true,"channel":{"name":"general"}}).to_string(),
+                true,
+            ),
+            (
+                json!({"ok":true,"user":{"name":"alice","is_bot":false}}).to_string(),
+                true,
+            ),
+        ]
+        .into_iter()
+        .chain((0..4).map(|_| (json!({"ok":true,"ts":"200"}).to_string(), true)))
+        .collect(),
     )
     .await?;
     let handler = Handler::new(
@@ -420,9 +604,9 @@ async fn two_slack_turns_share_history_and_preserve_native_tables()
     handler.process(payload("C1", "100", None)).await?;
     handler.process(payload("C1", "101", Some("100"))).await?;
     let requests = tokio::time::timeout(Duration::from_secs(5), server).await???;
-    let final_body: Value = serde_json::from_str(&requests[1].1)?;
+    let final_body: Value = serde_json::from_str(&requests[3].1)?;
     assert_eq!(final_body["blocks"][0]["text"], table);
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 6);
     assert!(
         model.requests()[1]
             .chat_history
@@ -431,7 +615,7 @@ async fn two_slack_turns_share_history_and_preserve_native_tables()
     assert!(
         model.requests()[1]
             .chat_history
-            .contains(&Message::user("[U1 (U1)]\nhello"))
+            .contains(&Message::user("Platform: slack\nChannel: general (C1)\nSender: alice (U1)\nTime: 1970-01-01T00:01:40Z\n\nhello"))
     );
     Ok(())
 }
@@ -449,9 +633,19 @@ async fn slack_long_reply_splits_at_unicode_limit_through_router()
     let mut cfg = rig_messaging::ChatConfig::default();
     cfg.reactions.enabled = false;
     let (url, server) = server(
-        (0..3)
-            .map(|_| (json!({"ok":true,"ts":"200"}).to_string(), true))
-            .collect(),
+        [
+            (
+                json!({"ok":true,"channel":{"name":"general"}}).to_string(),
+                true,
+            ),
+            (
+                json!({"ok":true,"user":{"name":"alice","is_bot":false}}).to_string(),
+                true,
+            ),
+        ]
+        .into_iter()
+        .chain((0..3).map(|_| (json!({"ok":true,"ts":"200"}).to_string(), true)))
+        .collect(),
     )
     .await?;
     let handler = Handler::new(
@@ -461,9 +655,9 @@ async fn slack_long_reply_splits_at_unicode_limit_through_router()
     );
     handler.process(payload("C1", "100", None)).await?;
     let requests = tokio::time::timeout(Duration::from_secs(5), server).await???;
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 5);
     let mut rendered = String::new();
-    for (_, body, _) in &requests[1..] {
+    for (_, body, _) in &requests[3..] {
         let body: Value = serde_json::from_str(body)?;
         let chunk = body["blocks"][0]["text"]
             .as_str()

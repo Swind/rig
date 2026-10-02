@@ -18,6 +18,23 @@ Message references retain the original channel for reactions. `reply_channel`
 selects the destination and conversation identity. Session keys encode all four
 routing fields with lengths so platform identifiers cannot collide.
 
+`Inbound.context: MessageContext` carries optional channel display names, UTC
+message times and mentioned users. `Inbound::prompt_text` renders these fields
+with the platform and sender as headers before the original text. Missing names
+fall back to IDs; missing times and mention lists are omitted. All ingress uses
+this format through `ChatRouter`, regardless of platform. Display names are user
+content; routing, authorization and history grouping continue to use stable IDs.
+
+```text
+Platform: slack
+Channel: backend (C123)
+Sender: Alice (U123)
+Time: 2026-10-02T02:30:00Z
+Mentions: Bob (U456)
+
+Can you help with the deployment?
+```
+
 Message splitting and markdown table rendering are adapted from OpenAB
 (Copyright (c) 2026 openabdev), under the MIT license in [LICENSE.OpenAB](LICENSE.OpenAB).
 
