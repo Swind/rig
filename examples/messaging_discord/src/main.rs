@@ -67,16 +67,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .tool(CountCharacters)
         .build();
     let cfg = ChatConfig {
-        attachment_mime_types: [
-            "image/png",
-            "image/jpeg",
-            "image/gif",
-            "image/webp",
-            "application/pdf",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect(),
+        attachment_mime_types: Some(
+            [
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/webp",
+                "application/pdf",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        ),
         ..Default::default()
     };
     let gate = Gate {

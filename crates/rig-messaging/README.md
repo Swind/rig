@@ -52,10 +52,11 @@ threads or downloading attachments, then call `handle` with the bot's platform
 user id. Channel allowlists match exact original channel ids, including threads.
 Rejected inputs produce no model or outbound calls.
 
-Set `ChatConfig::attachment_mime_types` to formats the model accepts for both
-bytes and URLs. The default set is empty. Supported image, document, audio and
-video MIME types become Rig user content. Other attachments become a short text
-note. Ingress owns downloads and size limits.
+By default, recognized image, document, audio and video MIME types become Rig
+user content, preserving attachment bytes or URLs. Set
+`ChatConfig::attachment_mime_types` to `Some(allowlist)` to restrict formats;
+`Some` with an empty set disables media content. Unrecognized or excluded
+attachments become a short text note. Ingress owns downloads and size limits.
 
 Egress consumes the stream through its terminal item even when preview operations
 fail. It uses the final response as authoritative and sends every reply chunk.

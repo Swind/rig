@@ -36,9 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let cfg = ChatConfig {
         attachment_mime_types: if go {
-            HashSet::new()
+            Some(HashSet::new())
         } else {
-            allowlist("MESSAGING_ATTACHMENT_MIME_TYPES").unwrap_or_default()
+            allowlist("MESSAGING_ATTACHMENT_MIME_TYPES")
         },
         ..Default::default()
     };

@@ -226,10 +226,7 @@ fn prompt_includes_display_context_and_converts_only_supported_media() {
             source: AttachmentSource::Url("https://example.com/file".into()),
         },
     ];
-    let cfg = ChatConfig {
-        attachment_mime_types: HashSet::from(["image/png".into()]),
-        ..Default::default()
-    };
+    let cfg = ChatConfig::default();
     let prompt = build_prompt(&m, &cfg);
     let content = match prompt {
         Message::User { content } => content,
@@ -308,10 +305,7 @@ fn attachment_conversion_supports_each_media_kind_and_source() {
             });
         }
     }
-    let cfg = ChatConfig {
-        attachment_mime_types: mime_types.into_iter().map(str::to_string).collect(),
-        ..Default::default()
-    };
+    let cfg = ChatConfig::default();
     let Message::User { content } = build_prompt(&m, &cfg) else {
         return;
     };
@@ -334,6 +328,49 @@ fn attachment_conversion_supports_each_media_kind_and_source() {
                 matches!(data,Some(rig_core::message::DocumentSourceKind::Url(url)) if url=="https://example.com/media")
             );
         }
+    }
+}
+
+#[test]
+fn attachment_allowlist_restricts_recognized_media_and_can_disable_it() {
+    let mut m = inbound("media");
+    m.attachments = vec![
+        Attachment {
+            filename: "image.png".into(),
+            mime: "image/png".into(),
+            size: None,
+            source: AttachmentSource::Bytes(bytes::Bytes::from_static(b"png")),
+        },
+        Attachment {
+            filename: "file.pdf".into(),
+            mime: "application/pdf".into(),
+            size: None,
+            source: AttachmentSource::Url("https://example.com/file.pdf".into()),
+        },
+    ];
+    for types in [HashSet::from(["image/png".into()]), HashSet::new()] {
+        let accepts_image = types.contains("image/png");
+        let cfg = ChatConfig {
+            attachment_mime_types: Some(types),
+            ..Default::default()
+        };
+        let content = match build_prompt(&m, &cfg) {
+            Message::User { content } => content,
+            _ => Vec::new(),
+        };
+        assert_eq!(content.len(), 3);
+        if accepts_image {
+            assert!(matches!(&content[1], UserContent::Image(_)));
+        } else {
+            assert_eq!(
+                content[1],
+                UserContent::text("[Attachment unavailable: image.png (image/png)]")
+            );
+        }
+        assert_eq!(
+            content[2],
+            UserContent::text("[Attachment unavailable: file.pdf (application/pdf)]")
+        );
     }
 }
 

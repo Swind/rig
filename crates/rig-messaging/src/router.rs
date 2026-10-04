@@ -17,14 +17,15 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-/// Output rendering and media types accepted by the configured provider/model.
+/// Output rendering and optional attachment MIME restrictions.
 #[derive(Debug, Clone, Default)]
 pub struct ChatConfig {
     /// Table rendering used when the adapter cannot render native tables.
     pub table_mode: TableMode,
-    /// MIME types accepted by the model for both bytes and URLs.
-    /// Empty by default. Other attachments become short text notes.
-    pub attachment_mime_types: HashSet<String>,
+    /// Optional exact MIME allowlist for both bytes and URLs.
+    /// `None` accepts all recognized media types. An empty set disables media.
+    /// Unrecognized or excluded attachments become short text notes.
+    pub attachment_mime_types: Option<HashSet<String>>,
     /// Status reaction configuration. Unsupported adapters disable it automatically.
     pub reactions: crate::reactions::ReactionConfig,
 }
@@ -126,7 +127,11 @@ impl ChatRouter {
 fn build_prompt(m: &Inbound, cfg: &ChatConfig) -> Message {
     let mut content = vec![UserContent::text(m.prompt_text())];
     for attachment in &m.attachments {
-        let media = if cfg.attachment_mime_types.contains(&attachment.mime) {
+        let media = if cfg
+            .attachment_mime_types
+            .as_ref()
+            .is_none_or(|types| types.contains(&attachment.mime))
+        {
             MediaType::from_mime_type(&attachment.mime)
         } else {
             None

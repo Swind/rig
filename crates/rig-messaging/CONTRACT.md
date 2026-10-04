@@ -140,13 +140,14 @@ Display metadata 是 user content，不能作為 authorization；Gate 與 sessio
 仍使用原本的穩定 id。各平台不一定提供所有名稱，詳見平台 README 的支援表。
 
 `Attachment` 包含 filename、MIME、可選 size 與 `Bytes` 或 `Url` payload。
-`ChatConfig::attachment_mime_types` 是精確 MIME allowlist，預設為空。
-只有 allowlist 內且 Rig 能辨識的 image、document、audio 或 video MIME，
-才轉成對應的 `UserContent`。其餘附件轉成包含檔名與 MIME 的文字說明。
+`ChatConfig::attachment_mime_types` 是可選的精確 MIME allowlist，預設為 `None`。
+預設將 Rig 能辨識的 image、document、audio 或 video MIME 轉成對應的
+`UserContent`，保留原始 bytes 或 URL。`Some(allowlist)` 只接受集合內的 MIME；
+`Some` 搭配空集合停用媒體內容。無法辨識或被排除的附件轉成包含檔名與 MIME 的文字說明。
 
 Ingress 負責下載驗證、授權、大小上限、timeout 與失敗說明。
 Router 不下載 URL、不檢查 attachment size，也不替 provider 取得私人附件的權限。
-同一 MIME 的 bytes 與 URL 都受相同 allowlist 限制；URL 必須能被所選 provider 使用。
+設定 allowlist 時，同一 MIME 的 bytes 與 URL 都受相同限制；URL 必須能被所選 provider 使用。
 
 ## 6. Adapter 與串流交付
 

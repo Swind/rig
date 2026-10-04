@@ -77,9 +77,10 @@ Defaults reject the bot's own messages and other bots. Group messages need a
 bot mention or a thread; DMs do not. Missing or empty allowlists impose no
 channel/user restriction. Configure `Gate` using stable platform IDs.
 
-`ChatConfig::attachment_mime_types` defaults to empty. Enable only MIME types
-accepted by the selected model. Ingress owns bounded downloads; the router
-converts unsupported attachments into text notes.
+`ChatConfig::attachment_mime_types` defaults to `None`, accepting all recognized
+media types and preserving bytes or URLs. Use `Some(allowlist)` to restrict MIME
+types or `Some` with an empty set to disable media content. Ingress owns bounded
+downloads; the router converts unrecognized or excluded attachments into text notes.
 
 For the full delivery and persistence contract, read the selected checkout's
 `crates/rig-messaging/CONTRACT.md`. Surface `ChatError` to application diagnostics;

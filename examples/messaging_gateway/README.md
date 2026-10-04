@@ -46,9 +46,10 @@ Optional comma-separated `MESSAGING_ALLOWED_CHANNELS` and
 self messages are rejected and group messages require mentions or threads.
 `TEAMS_ALLOWED_TENANTS` additionally restricts Teams tenant metadata.
 `LINEWORKS_MEDIA_HOSTS` and `TEAMS_MEDIA_HOSTS` explicitly trust private media
-hosts. Use only the HTTPS hosts actually issued by your platform. Attachment
-MIME types are empty by default; configure `MESSAGING_ATTACHMENT_MIME_TYPES`
-for a model that accepts those formats. Go uses text-only input in this example.
+hosts. Use only the HTTPS hosts actually issued by your platform. Recognized
+attachment MIME types are accepted by default. Set
+`MESSAGING_ATTACHMENT_MIME_TYPES` to restrict them; an empty value disables media
+content. Go uses text-only input in this example.
 
 The server acknowledges webhooks before generation finishes. Tasks, recent-ID
 deduplication, polling offsets and conversation memory do not survive restarts.

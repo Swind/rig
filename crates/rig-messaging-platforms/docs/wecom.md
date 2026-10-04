@@ -20,7 +20,8 @@ configured HTTP limit, with additional 10 MiB image and 20 MiB file ceilings.
 Inbound context copies `CreateTime` as the event timestamp. Callback messages do
 not supply a channel display name or structured mentions; sender names fall
 back to the corporate user ID.
-The caller must configure allowed attachment MIME types in `ChatConfig`.
+Recognized attachment MIME types are accepted by default. Set
+`ChatConfig::attachment_mime_types` to `Some(allowlist)` to restrict them.
 
 Text sending returns real `msgid` values. Recall uses the message recall API.
 Edits, reactions, and threads return `Unsupported`. The scalar message limit

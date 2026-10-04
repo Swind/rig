@@ -37,18 +37,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let cfg = ChatConfig {
         attachment_mime_types: if go {
-            HashSet::new()
+            Some(HashSet::new())
         } else {
-            [
-                "image/png",
-                "image/jpeg",
-                "image/gif",
-                "image/webp",
-                "application/pdf",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+            Some(
+                [
+                    "image/png",
+                    "image/jpeg",
+                    "image/gif",
+                    "image/webp",
+                    "application/pdf",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            )
         },
         ..Default::default()
     };
