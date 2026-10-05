@@ -83,3 +83,7 @@ providers/gemini/model_listing.rs | let page: ListModelsResponse = serde_json::f
 providers/gemini/transcription.rs | let mut generation_config = serde_json::from_value::<GenerationConfig>(additional_params)?; | Reads the caller's own `additional_params` on the REQUEST side, before anything is sent; it decodes no reply and cannot triage a frame.
 rig-bedrock/src/embedding.rs | .and_then(|body| serde_json::from_str(&body).map_err(ProviderError::Json)); | InvokeModel returns the model's whole JSON body as an opaque blob; the transport decodes that one document into the typed reply before any frame exists, and a malformed body is the frame's error, never skipped.
 rig-bedrock/src/image.rs | serde_json::from_str::<TextToImageResponse>(&body) | The unary InvokeModel reply is one opaque JSON blob with no frames to triage; its typed decode fails the call with a ProviderError, never skipped.
+
+# --- Feishu messaging: platform protocol, not model streaming -------------
+rig-messaging-platforms/src/feishu/websocket.rs | let config:Value=serde_json::from_slice(payload)?; | Decodes heartbeat configuration from a Feishu protobuf control frame; malformed JSON returns a messaging error and reconnects the socket. No model frame is classified.
+rig-messaging-platforms/src/feishu/websocket.rs | let value:Result<Value,_>=serde_json::from_slice(&payload); | Decodes a reassembled Feishu message event before normalization; malformed JSON produces a 500 acknowledgement and no inbound message. No model frame is classified.
