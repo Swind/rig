@@ -36,6 +36,7 @@ extern crate self as rig;
 pub mod audio_generation;
 pub mod client;
 pub mod completion;
+pub mod conversation_search;
 pub mod cypher;
 pub mod driver;
 pub mod effect;

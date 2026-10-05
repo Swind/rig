@@ -10,6 +10,7 @@ More information about this crate can be found in the [crate documentation](http
   - [Installation](#installation)
   - [WASM target support](#wasm-target-support)
   - [Simple example:](#simple-example)
+  - [Conversation search](#conversation-search)
   - [Integrations](#integrations)
   - [Who is using Rig?](#who-is-using-rig)
 
@@ -21,6 +22,7 @@ More information about this crate can be found in the [crate documentation](http
 - Built-in providers selectable as data: `providers::registry` names a vendor and a protocol family (`deepseek/openai:deepseek-chat`) or carries a whole typed configuration, and both round-trip through serde without a credential. Model references discard embedded credentials and reject empty identifiers; a configuration's `id()` returns a catalog selection only when its dialect name is registered. Providers outside this catalog can use a `Model` and `ModelAdapter` directly.
 - 10+ vector store integrations, all under one singular unified interface
 - Parameterized Cypher execution through `cypher::CypherQuery`, with JSON-projected rows and backend-specific syntax. Statements may read or modify data; unsupported parameter or result values return conversion errors.
+- Search saved conversation excerpts through `conversation_search::ConversationSearch` and the built-in `search_conversations` tool, using an application-supplied backend.
 - Full support for LLM completion and embedding workflows
 - Support for transcription, audio generation and image generation model capabilities
 - Integrate LLMs in your app with minimal boilerplate
@@ -72,6 +74,33 @@ Note using `#[tokio::main]` requires you enable tokio's `macros` and `rt-multi-t
 or just `full` to enable all features (`cargo add tokio --features macros,rt-multi-thread`).
 
 You can find more examples in the repository-level `examples/` directory. Many provider-specific examples now also live as ignored live integration tests under the repository-level `tests/providers` directory, organized by provider. When running those provider-backed tests, prefer provider-specific targets such as `cargo test -p rig --test openai -- --ignored --test-threads=1` to avoid rate-limiting. More detailed walkthroughs are regularly published on our Dev.to blog and added to Rig's official documentation at `docs.rig.rs`.
+
+## Conversation search
+
+Implement `conversation_search::ConversationSearch` to search saved conversations.
+Requests contain a query, a result limit, and an optional conversation ID.
+Results contain original messages, their zero-based starting position, and
+stable conversation and chunk references. Search is separate from
+`memory::ConversationMemory`, which loads and appends conversation history.
+
+```rust
+use rig_core::{
+    conversation_search::ConversationSearch,
+    tool::builtin::SearchConversationsTool,
+};
+
+fn search_tool<S: ConversationSearch>(scoped_backend: S) -> SearchConversationsTool<S> {
+    SearchConversationsTool::new(scoped_backend)
+}
+```
+
+The tool is named `search_conversations`. It validates arguments and defaults
+to five results, with a maximum of 100. Supply a backend already scoped to the
+caller's permitted conversations. The optional conversation ID narrows that
+scope. The backend owns ranking, excerpt size, and original-message retrieval,
+including complete tool-call/result exchanges. Applications can implement it
+using vector search, graph queries, and conversation storage. Rig provides no
+concrete conversation search backend.
 
 ## Integrations
 Rig supports the following LLM providers out of the box:
