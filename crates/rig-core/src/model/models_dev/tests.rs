@@ -24,7 +24,7 @@ impl crate::http_client::middleware::HttpMiddleware for PauseFetch {
 }
 
 #[tokio::test]
-async fn overlapping_queries_share_an_in_flight_fetch() -> Result<(), Box<dyn std::error::Error>> {
+async fn overlapping_queries_share_an_in_flight_fetch() -> anyhow::Result<()> {
     let http = SequencedHttpClient::new([MockHttpResponse::success(catalog())]);
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -51,12 +51,12 @@ async fn overlapping_queries_share_an_in_flight_fetch() -> Result<(), Box<dyn st
     attempted.notified().await;
     release.notify_one();
     let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        Ok::<_, Box<dyn std::error::Error>>((first.await??, second.await??))
+        Ok::<_, anyhow::Error>((first.await??, second.await??))
     })
     .await??;
-    assert!(first.is_some());
-    assert!(second.is_some());
-    assert_eq!(http.requests().len(), 1);
+    anyhow::ensure!(first.is_some(), "first query should find the model");
+    anyhow::ensure!(second.is_some(), "second query should find the model");
+    anyhow::ensure!(http.requests().len() == 1, "queries should share one fetch");
     Ok(())
 }
 
@@ -70,28 +70,46 @@ fn catalog() -> String {
 }
 
 #[test]
-fn limits_are_provider_scoped_and_missing_metadata_stays_absent() -> Result<(), Error> {
+fn limits_are_provider_scoped_and_missing_metadata_stays_absent() -> anyhow::Result<()> {
     let catalog = serde_json::from_str(&catalog())?;
     let first = lookup(&catalog, "first", "shared").ok_or(Error::InvalidCatalog)?;
-    assert_eq!(first.context_length, Some(1000000));
-    assert_eq!(first.max_output_tokens, Some(384000));
-    assert_eq!(first.name.as_deref(), Some("First"));
-    assert_eq!(
-        lookup(&catalog, "second", "shared").and_then(|info| info.context_length),
-        Some(8192)
+    anyhow::ensure!(
+        first.context_length == Some(1000000),
+        "context limit changed"
+    );
+    anyhow::ensure!(
+        first.max_output_tokens == Some(384000),
+        "output limit changed"
+    );
+    anyhow::ensure!(first.name.as_deref() == Some("First"), "model name changed");
+    anyhow::ensure!(
+        lookup(&catalog, "second", "shared").and_then(|info| info.context_length) == Some(8192),
+        "context limits must remain provider-scoped"
     );
     for id in ["invalid", "oversized"] {
         let info = lookup(&catalog, "first", id).ok_or(Error::InvalidCatalog)?;
-        assert_eq!(info.context_length, None);
-        assert_eq!(info.max_output_tokens, None);
+        anyhow::ensure!(
+            info.context_length.is_none(),
+            "{id} context limit must be absent"
+        );
+        anyhow::ensure!(
+            info.max_output_tokens.is_none(),
+            "{id} output limit must be absent"
+        );
     }
-    assert!(lookup(&catalog, "unknown", "shared").is_none());
-    assert!(lookup(&catalog, "first", "unknown").is_none());
+    anyhow::ensure!(
+        lookup(&catalog, "unknown", "shared").is_none(),
+        "unknown provider must not resolve"
+    );
+    anyhow::ensure!(
+        lookup(&catalog, "first", "unknown").is_none(),
+        "unknown model must not resolve"
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn clones_share_fetches_and_invalidation_refreshes_the_catalog() -> Result<(), Error> {
+async fn clones_share_fetches_and_invalidation_refreshes_the_catalog() -> anyhow::Result<()> {
     let http = SequencedHttpClient::new([
         MockHttpResponse::success(catalog()),
         MockHttpResponse::success(catalog()),
@@ -100,19 +118,31 @@ async fn clones_share_fetches_and_invalidation_refreshes_the_catalog() -> Result
     let clone = cache.clone();
     let (first, second) =
         futures::join!(cache.get("first", "shared"), clone.get("second", "shared"));
-    assert!(first?.is_some());
-    assert!(second?.is_some());
-    assert!(clone.get("missing", "missing").await?.is_none());
-    assert_eq!(http.requests().len(), 1);
-    assert!(!http.requests()[0].headers.contains_key("authorization"));
+    anyhow::ensure!(first?.is_some(), "first provider model must resolve");
+    anyhow::ensure!(second?.is_some(), "second provider model must resolve");
+    anyhow::ensure!(
+        clone.get("missing", "missing").await?.is_none(),
+        "missing model must remain absent"
+    );
+    anyhow::ensure!(http.requests().len() == 1, "clones should share one fetch");
+    anyhow::ensure!(
+        !http.requests()[0].headers.contains_key("authorization"),
+        "catalog requests must not include authorization"
+    );
     cache.invalidate().await;
-    assert!(clone.get("first", "shared").await?.is_some());
-    assert_eq!(http.requests().len(), 2);
+    anyhow::ensure!(
+        clone.get("first", "shared").await?.is_some(),
+        "model must resolve after invalidation"
+    );
+    anyhow::ensure!(
+        http.requests().len() == 2,
+        "invalidation should trigger a fetch"
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn failed_fetches_do_not_poison_the_cache() -> Result<(), Error> {
+async fn failed_fetches_do_not_poison_the_cache() -> anyhow::Result<()> {
     let http = SequencedHttpClient::new([
         MockHttpResponse::ErrorResponse(StatusCode::SERVICE_UNAVAILABLE, Bytes::new()),
         MockHttpResponse::success("not-json"),
@@ -120,20 +150,32 @@ async fn failed_fetches_do_not_poison_the_cache() -> Result<(), Error> {
         MockHttpResponse::success(catalog()),
     ]);
     let cache = ModelsDev::new(DynHttpClient::new(http.clone()));
-    assert!(matches!(
-        cache.get("first", "shared").await,
-        Err(Error::Status(StatusCode::SERVICE_UNAVAILABLE))
-    ));
-    assert!(matches!(
-        cache.get("first", "shared").await,
-        Err(Error::Json(_))
-    ));
-    assert!(matches!(
-        cache.get("first", "shared").await,
-        Err(Error::InvalidCatalog)
-    ));
-    assert!(cache.get("first", "shared").await?.is_some());
-    assert_eq!(http.requests().len(), 4);
+    anyhow::ensure!(
+        matches!(
+            cache.get("first", "shared").await,
+            Err(Error::Status(StatusCode::SERVICE_UNAVAILABLE))
+        ),
+        "unavailable response must return a status error"
+    );
+    anyhow::ensure!(
+        matches!(cache.get("first", "shared").await, Err(Error::Json(_))),
+        "malformed JSON must return a JSON error"
+    );
+    anyhow::ensure!(
+        matches!(
+            cache.get("first", "shared").await,
+            Err(Error::InvalidCatalog)
+        ),
+        "invalid catalog structure must return an invalid catalog error"
+    );
+    anyhow::ensure!(
+        cache.get("first", "shared").await?.is_some(),
+        "successful fetch must resolve the model after failures"
+    );
+    anyhow::ensure!(
+        http.requests().len() == 4,
+        "failed fetches must remain retryable"
+    );
     Ok(())
 }
 

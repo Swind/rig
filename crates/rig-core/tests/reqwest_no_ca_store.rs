@@ -33,7 +33,7 @@ fn empty_the_ca_store() {
 }
 
 #[tokio::test]
-async fn the_shared_transport_reports_a_missing_ca_store_on_send() {
+async fn the_shared_transport_reports_a_missing_ca_store_on_send() -> anyhow::Result<()> {
     empty_the_ca_store();
 
     let model = OpenAIConfig::new("test-key")
@@ -45,24 +45,25 @@ async fn the_shared_transport_reports_a_missing_ca_store_on_send() {
         Err(other) => format!("wrong variant: {other}"),
         Ok(_) => "sent a request with no CA store".to_owned(),
     };
-    assert!(
+    anyhow::ensure!(
         outcome.contains("CA certificates"),
         "expected the Http error naming the CA store, got: {outcome}"
     );
 
     // A stream opens (nothing is sent until it is polled) and the same
     // failure is its first item.
-    let mut stream = model
-        .stream(request)
-        .expect("a stream opens before sending");
+    let mut stream = model.stream(request)?;
     let first = stream
         .next()
         .await
-        .expect("the build failure is the first item");
-    let report = first.expect_err("the first item is the failure");
-    assert_eq!(report.kind(), ErrorKind::Http, "{report:?}");
-    assert!(
+        .ok_or_else(|| anyhow::anyhow!("the build failure must be the first item"))?;
+    let report = first
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("the first item must be the failure"))?;
+    anyhow::ensure!(report.kind() == ErrorKind::Http, "{report:?}");
+    anyhow::ensure!(
         report.to_string().contains("CA certificates"),
         "expected the report to name the CA store, got: {report}"
     );
+    Ok(())
 }
