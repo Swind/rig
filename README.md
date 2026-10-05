@@ -222,7 +222,8 @@ excerpts independently of conversation memory. Wrap an implementation with
 `search_conversations` tool to an agent. The backend owns access control,
 ranking, and retrieval of original messages; it can coordinate vector and
 graph queries. Rig provides the contract and tool wrapper. Applications supply
-the search backend. See the [core usage guide](crates/rig-core/README.md#conversation-search).
+the search backend. See the [core usage guide](crates/rig-core/README.md#conversation-search)
+and [architecture documentation](docs/README.md).
 
 We also have some other associated crates that have additional functionality you may find helpful when using Rig:
 - `rig-onchain-kit` - the [Rig Onchain Kit.](https://github.com/0xPlaygrounds/rig-onchain-kit) Intended to make interactions between Solana/EVM and Rig much easier to implement.

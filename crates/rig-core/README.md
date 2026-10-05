@@ -102,6 +102,9 @@ including complete tool-call/result exchanges. Applications can implement it
 using vector search, graph queries, and conversation storage. Rig provides no
 concrete conversation search backend.
 
+See the [conversation search architecture](../../docs/architecture/conversation-search.md)
+for the contract, tool execution flow, and backend responsibilities.
+
 ## Integrations
 Rig supports the following LLM providers out of the box:
 

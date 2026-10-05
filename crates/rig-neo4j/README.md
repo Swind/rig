@@ -80,6 +80,9 @@ statement. Use database permissions when the caller requires read-only access.
 Queries use Neo4j's Cypher dialect. This interface does not make queries portable
 across database dialects or automatically record queries on Rig's effect bus.
 
+See the [Cypher architecture](../../docs/architecture/cypher.md) for the
+execution flow, conversion rules, and error phases.
+
 ## Notes
 
 - The `rig-neo4j::vector_index` module offers utility functions to create and query a Neo4j vector index. You can also create indexes using the Neo4j browser or directly call cypther queries with the Neo4rs crate. See the [Neo4j documentation](https://neo4j.com/docs/genai/tutorials/embeddings-vector-indexes/setup/vector-index/) for more information. Example [examples/vector_search_simple.rs](examples/vector_search_simple.rs) shows how to create an index on existing data.
