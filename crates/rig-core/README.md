@@ -25,6 +25,11 @@ More information about this crate can be found in the [crate documentation](http
 - Integrate LLMs in your app with minimal boilerplate
 - Full WASM compatibility (core library only)
 
+OpenAI Chat Completions and Responses, Anthropic, Gemini GenerateContent and
+Ollama accept raw bytes for supported media inputs and encode them during request
+conversion. Raw text documents are decoded as UTF-8. URLs retain their source
+form, and unsupported formats still return conversion errors.
+
 ## Installation
 ```bash
 cargo add rig-core --features reqwest

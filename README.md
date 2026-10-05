@@ -89,6 +89,11 @@ Rig separates portable provider/backend contracts from agent orchestration:
 The root `rig` facade re-exports both at their familiar paths, so most code
 depends only on `rig`.
 
+Use `agent.prompt(text).attach_files(contents)?` to append typed image, document,
+audio or video content to a fresh user prompt. Attachment bytes and URLs remain
+unchanged in history; supported providers encode raw binary content when building
+requests. See the [attachment API](crates/rig-agent/README.md#attachments).
+
 Hosts construct HTTP or SDK models with their chosen authentication, transport
 policy and runtime lifetime; both agent runtimes execute the resulting
 `Model` through one shared adapter. ECS checkpoints retain execution

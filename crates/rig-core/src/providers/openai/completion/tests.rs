@@ -1749,17 +1749,18 @@ fn pdf_url_document_returns_conversion_error() {
 }
 
 #[test]
-fn pdf_raw_document_returns_conversion_error() {
+fn pdf_raw_document_serializes_as_base64_file_content() {
     let doc = message::UserContent::Document(message::Document {
         data: DocumentSourceKind::Raw(b"%PDF-1.4\n".to_vec()),
         media_type: Some(message::DocumentMediaType::PDF),
         additional_params: None,
     });
-    let res: Result<UserContent, _> = doc.try_into();
-    assert!(matches!(
-        res,
-        Err(message::MessageError::ConversionError(_))
-    ));
+    let converted = UserContent::try_from(doc).expect("raw PDF conversion");
+    let json = serde_json::to_value(converted).expect("serialize");
+    assert_eq!(
+        json["file"]["file_data"],
+        "data:application/pdf;base64,JVBERi0xLjQK"
+    );
 }
 
 #[test]

@@ -19,6 +19,31 @@ let agent = AgentBuilder::new(model).build();
 let answer = agent.prompt("Explain ownership briefly.").await?;
 ```
 
+## Attachments
+
+Append typed attachment content to a fresh user prompt with `attach_files`.
+The method preserves sources and order without reading files or downloading URLs.
+It returns an error for non-user prompts and resumed runs.
+
+```rust,no_run
+use rig_agent::Agent;
+use rig_core::message::{ImageMediaType, UserContent};
+
+async fn describe(agent: &Agent, image: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+    let response = agent.prompt("Describe this image.")
+        .attach_files([UserContent::image_raw(image, Some(ImageMediaType::PNG), None)])?
+        .await?;
+    println!("{}", response.output);
+    Ok(())
+}
+```
+
+OpenAI Chat Completions and Responses, Anthropic, Gemini GenerateContent and
+Ollama encode supported raw binary attachments when building requests. Raw text
+documents are decoded as UTF-8. Unsupported media types and source kinds still
+return provider errors. Request encoding leaves the run transcript and memory
+sources unchanged.
+
 ## Recording and replay
 
 The runtime accepts `rig_core::serve::Recorder`, not a concrete log type.

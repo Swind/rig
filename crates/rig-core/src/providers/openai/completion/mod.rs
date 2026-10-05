@@ -9,6 +9,7 @@ use crate::completion::CompletionRequest as CoreCompletionRequest;
 use crate::error::EncodeError;
 use crate::json_utils::string_or_vec;
 use crate::message::{AudioMediaType, DocumentSourceKind, ImageDetail, MimeType};
+use crate::providers::internal::media::{decode_raw_text, encode_raw_source};
 use crate::{completion, json_utils, message};
 use serde::{Deserialize, Serialize, Serializer};
 use std::convert::Infallible;
@@ -667,7 +668,7 @@ impl TryFrom<message::ToolResult> for Message {
                     detail,
                     ..
                 }) => {
-                    let url = match data {
+                    let url = match encode_raw_source(data) {
                         DocumentSourceKind::Url(url) => url,
                         DocumentSourceKind::Base64(data) => {
                             let media_type = media_type.ok_or_else(|| {
@@ -679,14 +680,6 @@ impl TryFrom<message::ToolResult> for Message {
                             })?;
                             format!("data:{};base64,{}", media_type.to_mime_type(), data)
                         }
-                        // Error messages must not expose raw image bytes.
-                        DocumentSourceKind::Raw(_) => {
-                            return Err(message::MessageError::ConversionError(
-                                "raw image bytes are not supported in a tool result; encode as \
-                                 base64 first"
-                                    .into(),
-                            ));
-                        }
                         // Source values may contain private caller data.
                         DocumentSourceKind::FileId(_) => {
                             return Err(message::MessageError::ConversionError(
@@ -695,7 +688,9 @@ impl TryFrom<message::ToolResult> for Message {
                                     .into(),
                             ));
                         }
-                        DocumentSourceKind::String(_) | DocumentSourceKind::Unknown => {
+                        DocumentSourceKind::Raw(_)
+                        | DocumentSourceKind::String(_)
+                        | DocumentSourceKind::Unknown => {
                             return Err(message::MessageError::ConversionError(
                                 "this image carries no usable source; use a URL or base64".into(),
                             ));
@@ -733,7 +728,7 @@ impl TryFrom<message::UserContent> for UserContent {
                 detail,
                 media_type,
                 ..
-            }) => match data {
+            }) => match encode_raw_source(data) {
                 DocumentSourceKind::Url(url) => Ok(UserContent::Image {
                     image_url: ImageUrl {
                         url,
@@ -786,7 +781,7 @@ impl TryFrom<message::UserContent> for UserContent {
                 data,
                 media_type: Some(message::DocumentMediaType::PDF),
                 ..
-            }) => match data {
+            }) => match encode_raw_source(data) {
                 DocumentSourceKind::Base64(b64) => Ok(UserContent::File {
                     file: FileData {
                         file_data: Some(format!("data:application/pdf;base64,{b64}")),
@@ -811,6 +806,9 @@ impl TryFrom<message::UserContent> for UserContent {
                 )),
             },
             message::UserContent::Document(message::Document { data, .. }) => {
+                if let DocumentSourceKind::Raw(bytes) = data {
+                    return Ok(UserContent::Text { text: decode_raw_text(bytes)? });
+                }
                 if let DocumentSourceKind::Base64(text) | DocumentSourceKind::String(text) = data {
                     Ok(UserContent::Text { text })
                 } else {
@@ -821,7 +819,7 @@ impl TryFrom<message::UserContent> for UserContent {
             }
             message::UserContent::Audio(message::Audio {
                 data, media_type, ..
-            }) => match data {
+            }) => match encode_raw_source(data) {
                 DocumentSourceKind::Base64(data) => Ok(UserContent::Audio {
                     input_audio: InputAudio {
                         data,
@@ -850,7 +848,7 @@ impl TryFrom<message::UserContent> for UserContent {
             message::UserContent::Video(message::Video {
                 data, media_type, ..
             }) => {
-                let url = match data {
+                let url = match encode_raw_source(data) {
                     DocumentSourceKind::Url(url) => url,
                     DocumentSourceKind::Base64(data) => {
                         let mime = media_type

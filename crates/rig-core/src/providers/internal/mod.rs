@@ -13,6 +13,7 @@
 pub(crate) mod auth;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) mod device_auth;
+pub(crate) mod media;
 pub(crate) mod openai_chat_completions_compatible;
 pub(crate) mod schema;
 pub mod thoughts;

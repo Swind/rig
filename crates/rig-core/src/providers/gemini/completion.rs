@@ -575,6 +575,7 @@ pub(crate) fn part_kind_name(part: &PartKind) -> &'static str {
 
 pub mod gemini_api_types {
     use crate::error::EncodeError;
+    use crate::providers::internal::media::{decode_raw_text, encode_raw_source};
     use std::{collections::HashMap, convert::Infallible, str::FromStr};
 
     use serde::{Deserialize, Serialize};
@@ -797,7 +798,7 @@ pub mod gemini_api_types {
         source: DocumentSourceKind,
         string_is_data: bool,
     ) -> Result<PartKind, message::MessageError> {
-        match source {
+        match encode_raw_source(source) {
             DocumentSourceKind::Url(file_uri) => Ok(PartKind::FileData(FileData {
                 mime_type: Some(mime_type),
                 file_uri,
@@ -901,16 +902,16 @@ pub mod gemini_api_types {
                     let mut response_values = Vec::new();
                     let mut parts: Vec<FunctionResponsePart> = Vec::new();
 
-                    for item in content.iter() {
+                    for item in content {
                         match item {
                             message::ToolResultContent::Text(text) => {
                                 response_values.push(json!(&text.text));
                             }
                             message::ToolResultContent::Json { value } => {
-                                response_values.push(value.clone());
+                                response_values.push(value);
                             }
                             message::ToolResultContent::Image(image) => {
-                                let part = match &image.data {
+                                let part = match encode_raw_source(image.data) {
                                     DocumentSourceKind::Base64(b64) => {
                                         let mime_type = gemini_tool_result_image_mime_type(
                                             image.media_type.as_ref(),
@@ -921,7 +922,7 @@ pub mod gemini_api_types {
                                         FunctionResponsePart {
                                             inline_data: Some(FunctionResponseInlineData {
                                                 mime_type: mime_type.to_string(),
-                                                data: b64.clone(),
+                                                data: b64,
                                                 display_name: None,
                                             }),
                                             file_data: None,
@@ -1016,10 +1017,8 @@ pub mod gemini_api_types {
                                 mime_type: Some(media_type.to_mime_type().to_string()),
                                 file_uri,
                             }),
-                            DocumentSourceKind::Raw(_) => {
-                                return Err(MessageError::ConversionError(
-                                    "Raw files not supported, encode as base64 first".to_string(),
-                                ));
+                            DocumentSourceKind::Raw(bytes) => {
+                                PartKind::Text(decode_raw_text(bytes)?)
                             }
                             DocumentSourceKind::FileId(_) => {
                                 return Err(MessageError::ConversionError(

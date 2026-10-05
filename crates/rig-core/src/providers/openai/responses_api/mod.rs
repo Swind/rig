@@ -17,6 +17,7 @@ use crate::json_utils::string_or_vec;
 use crate::message::{
     Document, DocumentMediaType, DocumentSourceKind, ImageDetail, MessageError, MimeType, Text,
 };
+use crate::providers::internal::media::{decode_raw_text, encode_raw_source};
 use crate::{completion, message};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
@@ -309,7 +310,6 @@ pub enum ToolResultOutputContent {
 }
 
 /// Returns a request error for an unsupported source.
-/// Callers must base64-encode raw bytes before request conversion.
 fn unsupported_document_source(source: DocumentSourceKind) -> EncodeError {
     match source {
         DocumentSourceKind::Raw(_) => {
@@ -340,7 +340,7 @@ fn responses_tool_result_output(
                 detail,
                 ..
             }) => {
-                let (image_url, file_id) = match data {
+                let (image_url, file_id) = match encode_raw_source(data) {
                     DocumentSourceKind::Base64(data) => {
                         let media_type = media_type.ok_or_else(|| {
                             MessageError::ConversionError(
@@ -439,7 +439,7 @@ fn input_items(
                             media_type: Some(DocumentMediaType::PDF),
                             ..
                         }) => {
-                            let (file_data, file_url, filename) = match data {
+                            let (file_data, file_url, filename) = match encode_raw_source(data) {
                                 DocumentSourceKind::Base64(data) => (
                                     Some(format!("data:application/pdf;base64,{data}")),
                                     None,
@@ -473,13 +473,19 @@ fn input_items(
                                 DocumentSourceKind::Base64(text) | DocumentSourceKind::String(text),
                             ..
                         }) => items.push(InputItem::user_content(UserContent::InputText { text })),
+                        crate::message::UserContent::Document(Document {
+                            data: DocumentSourceKind::Raw(bytes),
+                            ..
+                        }) => items.push(InputItem::user_content(UserContent::InputText {
+                            text: decode_raw_text(bytes)?,
+                        })),
                         crate::message::UserContent::Image(crate::message::Image {
                             data,
                             media_type,
                             detail,
                             ..
                         }) => {
-                            let url = match data {
+                            let url = match encode_raw_source(data) {
                                 DocumentSourceKind::Base64(data) => {
                                     let media_type = media_type
                                         .map(|media_type| media_type.to_mime_type().to_string())

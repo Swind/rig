@@ -9,6 +9,7 @@
 use crate::completion::CompletionRequest;
 use crate::error::EncodeError;
 use crate::json_utils::string_or_vec;
+use crate::providers::internal::media::{decode_raw_text, encode_raw_source};
 use crate::{
     completion,
     message::{self, DocumentMediaType, DocumentSourceKind, MessageError, MimeType},
@@ -892,7 +893,7 @@ impl Message {
                                 })
                             }
                             message::ToolResultContent::Image(image) => {
-                                let DocumentSourceKind::Base64(data) = image.data else {
+                                let DocumentSourceKind::Base64(data) = encode_raw_source(image.data) else {
                                     return Err(MessageError::ConversionError(
                                         "Only base64 strings can be used with the Anthropic API"
                                             .to_string(),
@@ -916,7 +917,7 @@ impl Message {
                     message::UserContent::Image(message::Image {
                         data, media_type, ..
                     }) => {
-                        let source = match data {
+                        let source = match encode_raw_source(data) {
                             DocumentSourceKind::Base64(data) => {
                                 let media_type =
                                     media_type.ok_or(MessageError::ConversionError(
@@ -978,7 +979,7 @@ impl Message {
                         };
 
                         let source = match media_type {
-                            DocumentMediaType::PDF => match data {
+                            DocumentMediaType::PDF => match encode_raw_source(data) {
                                 DocumentSourceKind::Base64(data)
                                 | DocumentSourceKind::String(data) => DocumentSource::Base64 {
                                     data,
@@ -992,12 +993,12 @@ impl Message {
                                 }
                             },
                             DocumentMediaType::TXT => {
-                                let (DocumentSourceKind::String(data)
-                                | DocumentSourceKind::Base64(data)) = data
-                                else {
-                                    return Err(MessageError::ConversionError(
+                                let data = match data {
+                                    DocumentSourceKind::Raw(bytes) => decode_raw_text(bytes)?,
+                                    DocumentSourceKind::String(data) | DocumentSourceKind::Base64(data) => data,
+                                    _ => return Err(MessageError::ConversionError(
                                         "Only string or base64 data is supported for plain text documents".into(),
-                                    ));
+                                    )),
                                 };
                                 DocumentSource::Text {
                                     data,

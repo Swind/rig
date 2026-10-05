@@ -57,6 +57,8 @@ user content, preserving attachment bytes or URLs. Set
 `ChatConfig::attachment_mime_types` to `Some(allowlist)` to restrict formats;
 `Some` with an empty set disables media content. Unrecognized or excluded
 attachments become a short text note. Ingress owns downloads and size limits.
+Provider request conversion encodes supported raw binary content as Base64 and
+decodes raw text documents as UTF-8. Attachment sources in history stay unchanged.
 
 Egress consumes the stream through its terminal item even when preview operations
 fail. It uses the final response as authoritative and sends every reply chunk.

@@ -168,6 +168,42 @@ impl AgentRunner {
         self
     }
 
+    /// Append attachment content to a fresh user prompt, preserving order and sources.
+    /// Providers encode raw bytes when building their requests. This does not
+    /// read files or download URLs.
+    /// Returns an error for resumed runs or prompts with a non-user role.
+    ///
+    /// ```rust,no_run
+    /// # use rig_agent::Agent;
+    /// # use rig_core::message::{ImageMediaType, UserContent};
+    /// # async fn example(agent: Agent, image: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+    /// let response = agent.prompt("Describe this image.")
+    ///     .attach_files([UserContent::image_raw(image, Some(ImageMediaType::PNG), None)])?
+    ///     .await?;
+    /// # let _ = response;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn attach_files(
+        mut self,
+        files: impl IntoIterator<Item = rig_core::message::UserContent>,
+    ) -> Result<Self, rig_core::message::MessageError> {
+        match &mut self.origin {
+            RunOrigin::Prompt(Message::User { content }) => content.extend(files),
+            RunOrigin::Prompt(_) => {
+                return Err(rig_core::message::MessageError::ConversionError(
+                    "Attachments require a user prompt".into(),
+                ));
+            }
+            RunOrigin::Resume(_) => {
+                return Err(rig_core::message::MessageError::ConversionError(
+                    "Attachments cannot be added to a resumed run".into(),
+                ));
+            }
+        }
+        Ok(self)
+    }
+
     /// Set the chat history preceding the prompt. Passing explicit history
     /// bypasses conversation memory for this run.
     pub fn history<I, T>(mut self, history: I) -> Self

@@ -604,15 +604,20 @@ fn user_message_from_content(
             crate::message::UserContent::Text(crate::message::Text { text, .. }) => {
                 texts.push(text);
             }
-            crate::message::UserContent::Image(crate::message::Image {
-                data: DocumentSourceKind::Base64(data),
-                ..
-            }) => images.push(data),
-            crate::message::UserContent::Image(_) => {
-                return Err(crate::message::MessageError::ConversionError(
-                    "Ollama images must be base64 encoded data".into(),
-                ));
+            crate::message::UserContent::Image(crate::message::Image { data, .. }) => {
+                let DocumentSourceKind::Base64(data) =
+                    crate::providers::internal::media::encode_raw_source(data)
+                else {
+                    return Err(crate::message::MessageError::ConversionError(
+                        "Ollama images must be raw bytes or base64 encoded data".into(),
+                    ));
+                };
+                images.push(data);
             }
+            crate::message::UserContent::Document(crate::message::Document {
+                data: DocumentSourceKind::Raw(bytes),
+                ..
+            }) => texts.push(crate::providers::internal::media::decode_raw_text(bytes)?),
             crate::message::UserContent::Document(crate::message::Document {
                 data: DocumentSourceKind::Base64(data) | DocumentSourceKind::String(data),
                 ..

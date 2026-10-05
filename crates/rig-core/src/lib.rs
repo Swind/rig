@@ -14,6 +14,8 @@
 //! wire to a [`driver::Transport`]; a [`DynModel`] is a model erased to
 //! its operation, for consumers that store one. Companion crates supply
 //! transports, agent runtimes, and external storage integrations.
+//! Supported provider mappings encode raw media bytes during request conversion;
+//! caller messages keep their original attachment sources.
 //!
 //! ```no_run
 //! use rig_core::DynModel;

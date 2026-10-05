@@ -153,6 +153,83 @@ fn agent_exposes_read_only_name_and_description() {
 }
 
 #[tokio::test]
+async fn attach_files_preserves_sources_in_requests_transcripts_and_memory() {
+    use rig_core::{
+        memory::{ConversationMemory, InMemoryConversationMemory},
+        message::{ImageMediaType, Message, UserContent},
+    };
+
+    for streamed in [false, true] {
+        let model = if streamed {
+            MockCompletionModel::from_stream_turns([[
+                MockStreamEvent::text("done"),
+                MockStreamEvent::final_response(Default::default()),
+            ]])
+        } else {
+            MockCompletionModel::text("done")
+        };
+        let memory = InMemoryConversationMemory::new();
+        let agent = AgentBuilder::new(model.clone())
+            .memory(memory.clone())
+            .build();
+        let image = UserContent::image_raw(vec![0, 255, 16], Some(ImageMediaType::PNG), None);
+        let url = UserContent::image_url(
+            "https://example.com/image.png",
+            Some(ImageMediaType::PNG),
+            None,
+        );
+        let runner = agent
+            .prompt("Describe these images.")
+            .attach_files([image.clone()])
+            .expect("raw attachment")
+            .attach_files([url.clone()])
+            .expect("URL attachment")
+            .conversation("attachments");
+        let response = if streamed {
+            let mut stream = runner.stream();
+            let mut response = None;
+            while let Some(item) = stream.next().await {
+                if let crate::agent::MultiTurnStreamItem::FinalResponse(final_response) =
+                    item.expect("stream item")
+                {
+                    response = Some(final_response);
+                }
+            }
+            response.expect("final response")
+        } else {
+            runner.await.expect("unary response")
+        };
+        let expected = Message::User {
+            content: vec![UserContent::text("Describe these images."), image, url],
+        };
+        assert_eq!(model.requests()[0].chat_history[0], expected);
+        assert_eq!(response.messages.as_ref().expect("transcript")[0], expected);
+        let stored = memory
+            .load(&rig_core::id::ConversationId::from("attachments"))
+            .await
+            .expect("memory load");
+        assert_eq!(stored[0], expected);
+    }
+}
+
+#[test]
+fn attach_files_rejects_non_user_prompts_and_resumed_runs() {
+    use rig_core::message::{ImageMediaType, Message, UserContent};
+
+    let agent = AgentBuilder::new(MockCompletionModel::text("done")).build();
+    let image = UserContent::image_raw(vec![0, 255, 16], Some(ImageMediaType::PNG), None);
+    for prompt in [Message::system("system"), Message::assistant("assistant")] {
+        assert!(agent.prompt(prompt).attach_files([image.clone()]).is_err());
+    }
+    assert!(
+        agent
+            .resume(crate::run::AgentRun::new("original prompt"))
+            .attach_files([image])
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn runner_applies_per_run_request_overrides() {
     let model = MockCompletionModel::text("done");
     AgentBuilder::new(model.clone())

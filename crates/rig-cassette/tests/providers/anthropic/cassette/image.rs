@@ -1,9 +1,9 @@
 //! Migrated from `examples/image.rs`.
 
-use base64::{Engine, prelude::BASE64_STANDARD};
 use rig::completion::message::Image;
 use rig::message::DocumentSourceKind;
 use rig::message::ImageMediaType;
+use rig::message::UserContent;
 use rig::providers::anthropic;
 use tokio::fs;
 
@@ -25,13 +25,15 @@ async fn image_prompt_from_fixture() {
             .await
             .expect("fixture image should be readable");
         let image = Image {
-            data: DocumentSourceKind::base64(&BASE64_STANDARD.encode(image_bytes)),
+            data: DocumentSourceKind::Raw(image_bytes),
             media_type: Some(ImageMediaType::JPEG),
             ..Default::default()
         };
 
         let response = agent
-            .prompt(image)
+            .prompt(Vec::<UserContent>::new())
+            .attach_files([UserContent::Image(image)])
+            .expect("attach raw image")
             .await
             .expect("image prompt should succeed")
             .output;

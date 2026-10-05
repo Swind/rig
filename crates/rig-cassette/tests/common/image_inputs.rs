@@ -92,7 +92,7 @@ pub async fn as_user_content<W, T>(
 {
     let message = Message::User {
         content: vec![
-            UserContent::image_base64(BASE64_STANDARD.encode(bytes), Some(media_type(bytes)), None),
+            UserContent::image_raw(bytes.to_vec(), Some(media_type(bytes)), None),
             UserContent::text(QUESTION),
         ],
     };
@@ -144,8 +144,8 @@ pub async fn as_tool_result<W, T>(
             content: vec![UserContent::tool_result(
                 call.id.clone(),
                 call.function.name.clone(),
-                vec![ToolResultContent::image_base64(
-                    BASE64_STANDARD.encode(bytes),
+                vec![ToolResultContent::image_raw(
+                    bytes.to_vec(),
                     Some(media_type(bytes)),
                     None,
                 )],
