@@ -1,0 +1,24 @@
+[package]
+name = "rig-ladybug"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+readme = "README.md"
+description = "Embedded Ladybug Cypher queries for Rig."
+repository = "https://github.com/0xPlaygrounds/rig"
+
+[lints]
+workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+lbug = { version = "=0.20.4", default-features = false }
+rig-core = { path = "../rig-core", version = "0.43.0", default-features = false }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+anyhow.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

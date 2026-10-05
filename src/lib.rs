@@ -273,6 +273,20 @@ pub mod qdrant_edge {
     pub use rig_qdrant_edge::*;
 }
 
+/// SQLite conversation history and context with Qdrant vector search.
+#[cfg(all(feature = "conversation-store", not(target_family = "wasm")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "conversation-store")))]
+pub mod conversation_store {
+    pub use rig_conversation_store::*;
+}
+
+/// Embedded Ladybug Cypher queries on native targets.
+#[cfg(all(feature = "ladybug", not(target_family = "wasm")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "ladybug")))]
+pub mod ladybug {
+    pub use rig_ladybug::*;
+}
+
 /// Native messaging platform transports and conversation routing.
 #[cfg(all(feature = "messaging", not(target_family = "wasm")))]
 #[cfg_attr(docsrs, doc(cfg(feature = "messaging")))]

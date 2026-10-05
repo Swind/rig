@@ -2,7 +2,8 @@
 
 Rig exposes saved-conversation search through a backend contract and a portable
 agent tool. The implementation lives in `rig-core`; the public facade re-exports
-it without an additional feature flag. Applications supply the search backend.
+it without an additional feature flag. Applications supply a search backend or
+use the optional [conversation storage companion](conversation-store.md).
 
 ## Components
 
@@ -72,10 +73,10 @@ when nothing matches. Result-count limits do not impose a token or byte budget.
 
 The backend owns authorization, ranking, excerpt size, and source retrieval.
 An application may coordinate `VectorStoreIndex`, [CypherQuery](cypher.md),
-and conversation storage behind this contract. Rig currently supplies no
-concrete conversation-search backend or automatic index synchronization.
-Session persistence, chunk generation, index updates, and token budgets remain
-application responsibilities.
+and conversation storage behind this contract. The optional
+`rig-conversation-store` companion supplies SQLite persistence and explicit
+Qdrant indexing and SQLite context retrieval behind the existing interfaces.
+Applications schedule index updates and choose the access scope and budgets.
 
 ## Regression coverage
 

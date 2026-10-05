@@ -5,7 +5,9 @@ These documents describe implemented APIs and their responsibilities:
 - [Conversation search](architecture/conversation-search.md): the search
   contract, original-message references, portable tool, and backend boundary.
 - [Cypher queries](architecture/cypher.md): the shared execution contract and
-  Neo4j parameter/result conversion.
+  Neo4j and Ladybug parameter/result conversion.
+- [Conversation storage](architecture/conversation-store.md): SQLite originals,
+  adjacent context, durable Qdrant indexing, scoped retrieval, and agent integration.
 
 ## Historical proposals
 

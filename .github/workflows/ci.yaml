@@ -248,6 +248,12 @@ jobs:
         run: cargo xtask verify --check native-only-rig-tungstenite
       - if: ${{ !cancelled() }}
         run: cargo xtask verify --check native-only-rig-qdrant-edge
+      - name: Ladybug native-only diagnostic
+        if: ${{ !cancelled() }}
+        run: cargo xtask verify --check native-only-rig-ladybug
+      - name: Conversation store native-only diagnostic
+        if: ${{ !cancelled() }}
+        run: cargo xtask verify --check native-only-rig-conversation-store
 
   # The executed wasm suites, under wasm-bindgen-test-runner on Node. The
   # CLI must match the lock file's wasm-bindgen version.

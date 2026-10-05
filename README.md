@@ -193,6 +193,8 @@ rig = { version = "0.36.0", features = ["lancedb", "fastembed"] }
 | Google Vertex AI | [`rig-vertexai`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-vertexai) | `vertexai` | `rig::vertexai` |
 | HelixDB | [`rig-helixdb`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-helixdb) | `helixdb` | `rig::helixdb` |
 | LanceDB | [`rig-lancedb`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-lancedb) | `lancedb` | `rig::lancedb` |
+| Ladybug Cypher (native, embedded) | [`rig-ladybug`](crates/rig-ladybug) | `ladybug` | `rig::ladybug` |
+| Conversation storage and search (native) | [`rig-conversation-store`](crates/rig-conversation-store) | `conversation-store` | `rig::conversation_store` |
 | Messaging transports (native) | [`rig-messaging`](crates/rig-messaging) | `messaging` | `rig::messaging` |
 | Messaging platform gateways (native) | [`rig-messaging-platforms`](crates/rig-messaging-platforms) | `messaging-platforms`, platform features | `rig::messaging_platforms` |
 | Memory policies | [`rig-memory`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-memory) | `memory` | `rig::memory` |
@@ -221,8 +223,9 @@ excerpts independently of conversation memory. Wrap an implementation with
 `rig::tool::builtin::SearchConversationsTool::new(backend)` to expose the
 `search_conversations` tool to an agent. The backend owns access control,
 ranking, and retrieval of original messages; it can coordinate vector and
-graph queries. Rig provides the contract and tool wrapper. Applications supply
-the search backend. See the [core usage guide](crates/rig-core/README.md#conversation-search)
+graph queries. Rig provides the contract and tool wrapper. The optional
+[`rig-conversation-store`](crates/rig-conversation-store) backend combines
+SQLite originals and adjacent context with Qdrant vectors. See the [core usage guide](crates/rig-core/README.md#conversation-search)
 and [architecture documentation](docs/README.md).
 
 We also have some other associated crates that have additional functionality you may find helpful when using Rig:

@@ -244,6 +244,8 @@ fn pr_preserves_required_platform_and_default_guarantees() {
         "wasm-rig-ecs-run_wasm",
         "native-only-rig-rmcp",
         "native-only-rig-qdrant-edge",
+        "native-only-rig-ladybug",
+        "native-only-rig-conversation-store",
         "loom",
         "doctests",
         "conformance",
@@ -690,7 +692,11 @@ fn full_lane_covers_every_integration_suite() {
             .into_owned();
         let source = format!("crates/{name}/src/lib.rs");
         let suite = name.strip_prefix("rig-").unwrap_or(&name);
-        let has_full_lane_tests = suites.contains(suite) || name == "rig-qdrant-edge";
+        let has_full_lane_tests = suites.contains(suite)
+            || matches!(
+                name.as_str(),
+                "rig-qdrant-edge" | "rig-ladybug" | "rig-conversation-store"
+            );
         assert_eq!(
             checks::full_lane(&source),
             has_full_lane_tests,

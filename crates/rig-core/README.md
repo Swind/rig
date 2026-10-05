@@ -99,8 +99,9 @@ to five results, with a maximum of 100. Supply a backend already scoped to the
 caller's permitted conversations. The optional conversation ID narrows that
 scope. The backend owns ranking, excerpt size, and original-message retrieval,
 including complete tool-call/result exchanges. Applications can implement it
-using vector search, graph queries, and conversation storage. Rig provides no
-concrete conversation search backend.
+using vector search, graph queries, and conversation storage. The optional
+[`rig-conversation-store`](../rig-conversation-store) companion implements both
+memory and search using SQLite and Qdrant.
 
 See the [conversation search architecture](../../docs/architecture/conversation-search.md)
 for the contract, tool execution flow, and backend responsibilities.

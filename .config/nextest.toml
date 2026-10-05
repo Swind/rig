@@ -34,6 +34,7 @@ retries = 0
 fail-fast = true
 default-filter = '''not (
     package(rig-service-tests)
+    | (package(rig-conversation-store) & test(qdrant_))
     | binary_id(rig-core::macro_hygiene)
     | (binary_id(rig::tool_facade_features) & test(=portable_tool_facade_is_feature_additive))
     | (binary_id(rig-reqwest::middleware_features) & test(=middleware_clients_are_available_for_each_tls_selector))

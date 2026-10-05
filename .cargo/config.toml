@@ -2,3 +2,7 @@
 # `cargo xtask <task>` — workspace maintenance tasks that are not part of the
 # build. See `crates/../xtask/src/main.rs` for the task list.
 xtask = "run --package xtask --quiet --"
+
+[env]
+# Match the native library to the pinned lbug Rust binding.
+LBUG_VERSION = { value = "0.20.4", force = false }

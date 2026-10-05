@@ -469,6 +469,14 @@ pub(super) fn all() -> Vec<Check> {
     for (package, message) in [
         ("rig-rmcp", "the `rmcp` feature is native-only"),
         (
+            "rig-ladybug",
+            "rig-ladybug is a native-only graph database backend",
+        ),
+        (
+            "rig-conversation-store",
+            "rig-conversation-store is a native-only conversation backend",
+        ),
+        (
             "rig-qdrant-edge",
             "rig-qdrant-edge is a native-only local storage backend",
         ),
@@ -506,6 +514,8 @@ pub(super) fn full_lane(path: &str) -> bool {
             .is_some_and(|name| !name.contains('/'))
         || [
             "rig-lancedb",
+            "rig-ladybug",
+            "rig-conversation-store",
             "rig-mongodb",
             "rig-neo4j",
             "rig-postgres",
