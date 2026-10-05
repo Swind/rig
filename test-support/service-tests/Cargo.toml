@@ -33,6 +33,9 @@ sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "uuid", "jso
 testcontainers = { workspace = true, optional = true }
 tokio-rusqlite = { workspace = true, features = ["bundled"], optional = true }
 
+[dev-dependencies]
+anyhow = { workspace = true }
+
 [features]
 default = []
 lancedb = ["rig/lancedb", "dep:lancedb", "dep:arrow-array", "dep:assert_fs"]

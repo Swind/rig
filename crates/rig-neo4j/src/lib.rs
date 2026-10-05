@@ -1,4 +1,4 @@
-//! Neo4j vector store for Rig.
+//! Neo4j vector search and Cypher queries for Rig.
 //!
 //! [`Neo4jVectorIndex`] queries a vector index that must already exist, created
 //! externally or through [`Neo4jClient::create_vector_index`]. Neo4j builds new
@@ -6,6 +6,9 @@
 //! instances need the GenAI plugin installed; Neo4j Aura enables it by default.
 //! The crate [README](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-neo4j)
 //! covers setup and further examples.
+//! [`rig_core::cypher::CypherQuery`] executes parameterized Cypher and returns
+//! named JSON projections. Native graph, temporal, spatial, and byte values
+//! must be projected to supported JSON values by the query.
 //!
 //! ```no_run
 //! use neo4rs::ConfigBuilder;
@@ -50,6 +53,7 @@
 //!     Ok(())
 //! }
 //! ```
+mod cypher;
 pub mod vector_index;
 use std::str::FromStr;
 

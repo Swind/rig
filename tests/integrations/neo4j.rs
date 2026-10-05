@@ -6,6 +6,7 @@ use testcontainers::{
 };
 
 use futures::{StreamExt, TryStreamExt};
+use rig::cypher::{CypherQuery, CypherQueryError, CypherRequest, CypherRow};
 use rig::neo4j::{Neo4jClient, ToBoltType};
 use rig::vector_store::VectorStoreIndex;
 use rig::vector_store::request::VectorSearchRequest;
@@ -34,6 +35,144 @@ struct Word {
     id: String,
     #[embed]
     definition: String,
+}
+
+async fn cypher_query(
+    client: &impl CypherQuery,
+    request: CypherRequest,
+) -> Result<Vec<CypherRow>, CypherQueryError> {
+    client.query(request).await
+}
+
+#[tokio::test]
+async fn cypher_query_contract_test() -> anyhow::Result<()> {
+    use std::error::Error as _;
+
+    if skip_if_docker_unavailable("cypher_query_contract_test") {
+        return Ok(());
+    }
+
+    let container = GenericImage::new("neo4j", "5.26.29")
+        .with_wait_for(WaitFor::Duration {
+            length: std::time::Duration::from_secs(5),
+        })
+        .with_exposed_port(BOLT_PORT.tcp())
+        .with_env_var("NEO4J_AUTH", "none")
+        .start()
+        .await?;
+    let port = container.get_host_port_ipv4(BOLT_PORT).await?;
+    let host = container.get_host().await?;
+    let client = Neo4jClient::connect(&format!("neo4j://{host}:{port}"), "", "").await?;
+
+    let name = "O'Reilly\\東京'); MATCH (n) DETACH DELETE n; //";
+    cypher_query(
+        &client,
+        CypherRequest::new(
+            "CREATE (p:CypherPerson {name: $name}),
+                    (a:CypherCompany {name: 'Acme'}),
+                    (b:CypherCompany {name: 'Beta'}),
+                    (p)-[:WORKS_AT]->(a), (p)-[:WORKS_AT]->(b)
+             RETURN p.name AS person",
+        )
+        .param("name", json!(name)),
+    )
+    .await?;
+
+    let rows = cypher_query(
+        &client,
+        CypherRequest::new(
+            "MATCH (p:CypherPerson)-[:WORKS_AT]->(c:CypherCompany)
+             WHERE p.name = $name
+             RETURN p.name AS person, c.name AS company ORDER BY company",
+        )
+        .param("name", json!(name)),
+    )
+    .await?;
+    anyhow::ensure!(
+        serde_json::to_value(rows)?
+            == json!([
+                {"person": name, "company": "Acme"},
+                {"person": name, "company": "Beta"}
+            ]),
+        "parameter binding or ordered relationship projection changed"
+    );
+
+    let payload = json!({
+        "null": null,
+        "bool": true,
+        "integer": -42,
+        "float": 1.25,
+        "string": name,
+        "list": [null, false, 7, {"nested": ["文字", 2.5]}],
+        "map": {"value": 0}
+    });
+    let rows = cypher_query(
+        &client,
+        CypherRequest::new("RETURN $payload AS payload").param("payload", payload.clone()),
+    )
+    .await?;
+    anyhow::ensure!(
+        serde_json::to_value(rows)? == json!([{"payload": payload}]),
+        "JSON values or the single-column map alias were lost"
+    );
+    let rows = cypher_query(&client, CypherRequest::new("RETURN null AS absent")).await?;
+    anyhow::ensure!(serde_json::to_value(rows)? == json!([{"absent": null}]));
+    let rows = cypher_query(
+        &client,
+        CypherRequest::new("MATCH (p:CypherPerson) WHERE false RETURN p.name AS name"),
+    )
+    .await?;
+    anyhow::ensure!(rows.is_empty(), "an empty result should have no rows");
+
+    let result = cypher_query(&client, CypherRequest::new("THIS IS NOT CYPHER")).await;
+    anyhow::ensure!(
+        matches!(&result, Err(CypherQueryError::Query { .. })),
+        "invalid Cypher should return a query error: {result:?}"
+    );
+    if let Err(error) = result {
+        anyhow::ensure!(error.source().is_some(), "query error lost its source");
+    }
+
+    let result = cypher_query(
+        &client,
+        CypherRequest::new("CREATE (:RejectedParameter {value: $value}) RETURN 1 AS created")
+            .param("value", json!(u64::MAX)),
+    )
+    .await;
+    anyhow::ensure!(
+        matches!(&result, Err(CypherQueryError::Parameter { name, .. }) if name == "value"),
+        "an oversized integer should return a named parameter error: {result:?}"
+    );
+    if let Err(error) = result {
+        anyhow::ensure!(error.source().is_some(), "parameter error lost its source");
+    }
+    let rows = cypher_query(
+        &client,
+        CypherRequest::new("MATCH (n:RejectedParameter) RETURN count(n) AS count"),
+    )
+    .await?;
+    anyhow::ensure!(
+        serde_json::to_value(rows)? == json!([{"count": 0}]),
+        "invalid parameters must be rejected before executing the statement"
+    );
+
+    for statement in [
+        "RETURN date('2026-01-01') AS day",
+        "RETURN duration('P1D') AS elapsed",
+        "RETURN {elapsed: [duration('P1D')]} AS nested",
+        "MATCH (p:CypherPerson) RETURN p AS person",
+        "MATCH (p:CypherPerson) RETURN {people: [p]} AS nested",
+    ] {
+        let result = cypher_query(&client, CypherRequest::new(statement)).await;
+        anyhow::ensure!(
+            matches!(&result, Err(CypherQueryError::Result { .. })),
+            "unsupported native values should return a result error: {result:?}"
+        );
+        if let Err(error) = result {
+            anyhow::ensure!(error.source().is_some(), "result error lost its source");
+        }
+    }
+    Ok(())
 }
 
 #[tokio::test]

@@ -206,6 +206,11 @@ rig = { version = "0.36.0", features = ["lancedb", "fastembed"] }
 | SQLite | [`rig-sqlite`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-sqlite) | `sqlite` | `rig::sqlite` |
 | TypeSafe Jev (experimental judgments) | [`rig-typesafeai`](crates/rig-typesafeai) | `typesafeai` | `rig::typesafeai` |
 
+With the `neo4j` feature enabled, `rig::neo4j::Neo4jClient` implements
+`rig::cypher::CypherQuery` for
+parameterized graph queries with JSON projection results. See the
+[Neo4j usage guide](crates/rig-neo4j/README.md#cypher-queries).
+
 `rig::memory` is available without the `memory` feature; it contains the core
 conversation memory traits and in-memory backend re-exported from `rig-core`.
 Enabling `features = ["memory"]` adds reusable history-shaping policy types from

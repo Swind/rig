@@ -20,6 +20,7 @@ More information about this crate can be found in the [crate documentation](http
 - Cached context and output limits from models.dev through `model::models_dev::ModelsDev`, using a caller-supplied HTTP transport.
 - Built-in providers selectable as data: `providers::registry` names a vendor and a protocol family (`deepseek/openai:deepseek-chat`) or carries a whole typed configuration, and both round-trip through serde without a credential. Model references discard embedded credentials and reject empty identifiers; a configuration's `id()` returns a catalog selection only when its dialect name is registered. Providers outside this catalog can use a `Model` and `ModelAdapter` directly.
 - 10+ vector store integrations, all under one singular unified interface
+- Parameterized Cypher execution through `cypher::CypherQuery`, with JSON-projected rows and backend-specific syntax. Statements may read or modify data; unsupported parameter or result values return conversion errors.
 - Full support for LLM completion and embedding workflows
 - Support for transcription, audio generation and image generation model capabilities
 - Integrate LLMs in your app with minimal boilerplate
