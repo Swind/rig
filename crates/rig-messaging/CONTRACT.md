@@ -258,7 +258,7 @@ Slack 私人附件的 bearer token 僅用於 HTTPS Slack host。
 
 | 組件 | 目前位置與責任 |
 | --- | --- |
-| [ModelsDev](../rig-core/src/model/models_dev.rs) | Rig core，回傳既有 `ModelInfo` 的 context／output limits，下載快取與手動 invalidation |
+| [ModelsDev](../rig-core/src/catalog/models_dev.rs) | Rig core，下載快取與手動 invalidation，回傳疊加 models.dev 資料的 upstream `Catalog` |
 | Agent、memory 與 hook 機制 | Rig agent，執行模型呼叫與管理 conversation history |
 | [Slack provider 配置](../../examples/messaging_slack/src/provider.rs) | 應用層，依 Go endpoint 選 API，建立 Agent 與 `ModelLimits` hook |
 
@@ -268,7 +268,9 @@ Slack 私人附件的 bearer token 僅用於 HTTPS Slack host。
 HTTP transport 與 deadline 由呼叫者提供，response 上限為 16 MiB。
 
 Slack 的 Go 範例以 endpoint suffix 分別選擇 OpenAI Chat、OpenAI Responses 或
-Anthropic Messages。每個 conversation 的 session key 透過 task-local middleware
+Anthropic Messages，透過 `Catalog::connect_with` 建立模型。相同 catalog 提供
+context／output limits、模型能力與價格，保留內建人工校正的 pinned facts。
+每個 conversation 的 session key 透過 task-local middleware
 帶入 `x-opencode-session`，與其他 conversation 分開。
 
 範例中的 `ModelLimits` hook 以完整 prepared request 的序列化 UTF-8 bytes

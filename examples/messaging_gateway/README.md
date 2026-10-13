@@ -6,7 +6,7 @@ uses the same model configuration as the [Slack example](../messaging_slack):
 `OPENCODE_GO_MODEL`, and `OPENCODE_GO_ENDPOINT`. The Go endpoint selects OpenAI
 Chat, Responses, or Anthropic Messages compatibility. Go requests carry the
 reply conversation's stable session ID and a truthful application User-Agent.
-Cached ModelsDev metadata bounds estimated context and output budgets.
+Cached models.dev data in Rig's Catalog bounds estimated context and output budgets.
 
 ```sh
 MESSAGING_PLATFORM=telegram cargo run --locked -p messaging_gateway

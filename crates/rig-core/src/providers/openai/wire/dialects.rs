@@ -475,6 +475,13 @@ pub const OLLAMA: Dialect = Dialect {
     )
 };
 
+/// OpenCode Go's OpenAI-format endpoint. The caller supplies session headers.
+pub const OPENCODE_GO: Dialect = Dialect::gateway(
+    "opencode-go",
+    "https://opencode.ai/zen/go/v1",
+    "OPENCODE_GO_API_KEY",
+);
+
 /// The dialect named `name`, or `None` when this build has no such provider.
 pub fn by_name(name: &str) -> Option<&'static Dialect> {
     all().find(|dialect| dialect.name == name)

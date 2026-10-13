@@ -130,7 +130,22 @@ pub const ANTHROPIC: Dialect = Dialect {
 };
 
 /// Registered Messages-format dialects in declaration order.
-const ALL: &[&Dialect] = &[&ANTHROPIC, &ZAI, &MINIMAX, &MOONSHOT, &XIAOMIMIMO];
+const ALL: &[&Dialect] = &[
+    &ANTHROPIC,
+    &ZAI,
+    &MINIMAX,
+    &MOONSHOT,
+    &XIAOMIMIMO,
+    &OPENCODE_GO,
+];
+
+/// OpenCode Go's Messages-format endpoint. The caller supplies session headers.
+pub const OPENCODE_GO: Dialect = compatible(
+    "opencode-go",
+    "https://opencode.ai/zen/go",
+    "OPENCODE_GO_API_KEY",
+    None,
+);
 
 /// Every Messages-format dialect this build knows, in declaration order.
 pub fn all() -> impl Iterator<Item = &'static Dialect> {

@@ -50,10 +50,13 @@ At startup, Go model limits are fetched from the `opencode-go` provider record
 in [models.dev](https://models.dev). Its `limit.context` and `limit.output`
 fields supply the context window and output cap. The fetch has a ten second
 timeout and a 16 MiB response limit. Missing or unavailable metadata leaves the
-configured output limit in place. This uses Rig's reusable
-`model::models_dev::ModelsDev::get(provider, model)` API and existing `ModelInfo`
-fields. The example shares one catalog for the process lifetime. Queries for
-other models reuse the same download. `ModelsDev` clones share their cache;
+configured output limit in place. `catalog::models_dev::ModelsDev` loads this
+data with `Catalog::from_models_dev` and layers it over `Catalog::builtin()`
+with `with_models_dev`, preserving hand-reviewed facts. The same catalog supplies
+limits, capabilities and prices to models built with `Catalog::connect_with`.
+The endpoint explicitly selects the protocol and Chat or Responses route.
+The example shares one downloaded catalog for the process lifetime.
+`ModelsDev` clones share their cache;
 `invalidate().await` clears it for the next fetch. The cache is in memory and
 does not survive a process restart. Failed fetches are retried on the next query.
 

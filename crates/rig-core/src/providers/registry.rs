@@ -60,6 +60,7 @@ pub(crate) const OPENAI_DIALECTS: &[&openai::wire::Dialect] = &[
     &openai::wire::XIAOMIMIMO,
     &openai::wire::COHERE,
     &openai::wire::OLLAMA,
+    &openai::wire::OPENCODE_GO,
     &crate::providers::xai::DIALECT,
     &crate::providers::chatgpt::DIALECT,
     &crate::providers::copilot::wire::DIALECT,
@@ -531,11 +532,12 @@ impl ProviderId {
 
 /// The primary family of each vendor registered in more than one, as
 /// models.dev lists the vendor's own API. [`ProviderId::catalog`] reads it.
-const PRIMARY: [(&str, Format); 4] = [
+const PRIMARY: [(&str, Format); 5] = [
     ("zai", Format::OpenAi),
     ("minimax", Format::Anthropic),
     ("moonshot", Format::OpenAi),
     ("xiaomimimo", Format::OpenAi),
+    ("opencode-go", Format::OpenAi),
 ];
 
 /// The family a reference to `vendor`'s `model` that names none is reached
@@ -1065,9 +1067,9 @@ impl<'a> From<&'a String> for ModelSelector<'a> {
 }
 
 /// How [`Catalog::connect_with`] connects: an explicit key, an HTTP client,
-/// a protocol family and a base URL. Each one left unset takes its default:
+/// a protocol family, an OpenAI route and a base URL. Each one left unset takes its default:
 /// the key from the environment, the shared reqwest client, the family the
-/// catalog row is reached by, and the dialect's base URL.
+/// catalog row is reached by, the dialect's route, and the dialect's base URL.
 ///
 /// ```no_run
 /// use rig_core::catalog::Catalog;
@@ -1084,6 +1086,7 @@ pub struct ConnectOptions {
     http: Option<DynHttpClient>,
     format: Option<Format>,
     base_url: Option<String>,
+    route: Option<openai::Route>,
 }
 
 impl ConnectOptions {
@@ -1117,6 +1120,13 @@ impl ConnectOptions {
         self.base_url = Some(base_url.into());
         self
     }
+
+    /// Choose Chat Completions or Responses for an OpenAI-format connection.
+    /// Returns [`ConnectError::UnsupportedRoute`] for other protocol families.
+    pub fn route(mut self, route: openai::Route) -> Self {
+        self.route = Some(route);
+        self
+    }
 }
 
 /// Never shows the key.
@@ -1127,6 +1137,7 @@ impl fmt::Debug for ConnectOptions {
             .field("http", &self.http.as_ref().map(|_| "<set>"))
             .field("format", &self.format)
             .field("base_url", &self.base_url)
+            .field("route", &self.route)
             .finish()
     }
 }
@@ -1135,6 +1146,14 @@ impl fmt::Debug for ConnectOptions {
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
+    /// An OpenAI route was supplied for another protocol family.
+    #[error("an OpenAI route cannot be selected for `{vendor}` in {format} format")]
+    UnsupportedRoute {
+        /// The vendor being connected to.
+        vendor: String,
+        /// The selected protocol family.
+        format: Format,
+    },
     /// The reference is not `vendor/model`.
     #[error("`{reference}` names no model: expected `vendor/model`")]
     Malformed {
@@ -1232,7 +1251,8 @@ impl Catalog {
     /// serves, [`ConnectError::Reference`] for a family the vendor is not
     /// registered for, [`ConnectError::MissingKey`] when no key is given or
     /// set, and [`ConnectError::NoHttpClient`] without the `reqwest`
-    /// feature and an HTTP client.
+    /// feature and an HTTP client. [`ConnectError::UnsupportedRoute`] when
+    /// an OpenAI route is given for another protocol family.
     pub fn connect_with<'a>(
         &self,
         model: impl Into<ModelSelector<'a>>,
@@ -1280,6 +1300,18 @@ impl Catalog {
         let config = match options.base_url {
             Some(base_url) => config.with_base_url(base_url),
             None => config,
+        };
+        let config = match (options.route, config) {
+            (Some(route), ProviderConfig::OpenAi(provider)) => {
+                ProviderConfig::OpenAi(provider.with_route(route))
+            }
+            (Some(_), _) => {
+                return Err(ConnectError::UnsupportedRoute {
+                    vendor: provider.vendor().to_owned(),
+                    format: registered.format(),
+                });
+            }
+            (None, config) => config,
         };
         let http = match options.http {
             Some(http) => http,

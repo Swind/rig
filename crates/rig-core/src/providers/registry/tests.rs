@@ -7,6 +7,58 @@ use crate::providers::openai::Route;
 use crate::providers::openai::responses_api::SystemInstructionsPlacement;
 use crate::test_utils::{RecordingHttpClient, json_body};
 
+#[tokio::test]
+#[allow(clippy::panic_in_result_fn)]
+async fn opencode_go_catalog_accepts_both_families_and_routes() -> anyhow::Result<()> {
+    let (catalog, skipped) = Catalog::from_models_dev(
+        r#"{
+        "opencode-go":{"models":{"fixture":{
+            "tool_call":true,"modalities":{"input":["text","image"]},
+            "limit":{"context":100000,"output":2048},
+            "cost":{"input":1,"output":2}
+        }}}
+    }"#,
+    )?;
+    assert!(skipped.is_empty());
+    let spec = catalog.resolve("opencode-go/fixture")?.spec;
+    assert_eq!(spec.context_window, Some(100000));
+    for (format, route, suffix) in [
+        (Format::OpenAi, Some(Route::Chat), "chat/completions"),
+        (Format::OpenAi, Some(Route::Responses), "responses"),
+        (Format::Anthropic, None, "messages"),
+    ] {
+        let (http, options) = offline();
+        let options = options.format(format);
+        let options = match route {
+            Some(route) => options.route(route),
+            None => options,
+        };
+        let model = catalog.connect_with("opencode-go/fixture", options)?;
+        let facts = model
+            .spec()
+            .ok_or_else(|| anyhow::anyhow!("missing Go model facts"))?;
+        assert_eq!(facts.context_window, spec.context_window);
+        assert_eq!(facts.pricing, spec.pricing);
+        assert!(facts.input.image);
+        assert_eq!(
+            sent_to(model, &http).await,
+            format!("https://opencode.ai/zen/go/v1/{suffix}")
+        );
+    }
+    assert!(matches!(
+        catalog.connect_with(
+            "opencode-go/fixture",
+            ConnectOptions::new()
+                .api_key("key")
+                .http(transport())
+                .format(Format::Anthropic)
+                .route(Route::Chat)
+        ),
+        Err(ConnectError::UnsupportedRoute { .. })
+    ));
+    Ok(())
+}
+
 /// A transport that sends nothing: every assertion here is about what is
 /// built, never about a reply.
 fn transport() -> crate::http_client::DynHttpClient {

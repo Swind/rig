@@ -9,13 +9,13 @@ use rig_agent::{
 };
 use rig_core::{
     DynModel,
+    catalog::{Catalog, models_dev::ModelsDev},
     effect::EffectKind,
     memory::InMemoryConversationMemory,
-    model::models_dev::ModelsDev,
     operation::Completion,
     providers::{
-        anthropic::AnthropicConfig,
-        openai::{self, OpenAI, OpenAIConfig},
+        openai::{self, Route},
+        registry::{ConnectOptions, Format},
     },
     wasm_compat::WasmBoxedFuture,
 };
@@ -34,7 +34,7 @@ pub(crate) enum Error {
     #[error(transparent)]
     Env(#[from] std::env::VarError),
     #[error(transparent)]
-    OpenAI(#[from] rig_core::client::env::EnvError),
+    Connect(#[from] rig_core::providers::registry::ConnectError),
     #[error(transparent)]
     Http(#[from] reqwest::Error),
     #[error("{0}")]
@@ -144,6 +144,7 @@ fn endpoint(endpoint: &str) -> Result<(Api, String), Error> {
     ))
 }
 fn go_model(
+    catalog: &Catalog,
     api_key: String,
     model: String,
     endpoint_url: &str,
@@ -165,23 +166,19 @@ fn go_model(
         .timeout(Duration::from_secs(300))
         .build()?;
     let http = DynHttpClient::new(ReqwestClient::from(client)).with_middleware(SessionHeader);
-    Ok(match api {
-        Api::Messages => AnthropicConfig::new(api_key)
-            .with_base_url(base)
-            .connect(http)
-            .completion(model)
-            .into(),
-        Api::Chat => OpenAIConfig::new(api_key)
-            .with_base_url(format!("{base}/v1"))
-            .connect(http)
-            .chat(model)
-            .into(),
-        Api::Responses => OpenAIConfig::new(api_key)
-            .with_base_url(format!("{base}/v1"))
-            .connect(http)
-            .responses(model)
-            .into(),
-    })
+    let options = ConnectOptions::new().api_key(api_key).http(http);
+    let options = match api {
+        Api::Messages => options.format(Format::Anthropic).base_url(base),
+        Api::Chat => options
+            .format(Format::OpenAi)
+            .base_url(format!("{base}/v1"))
+            .route(Route::Chat),
+        Api::Responses => options
+            .format(Format::OpenAi)
+            .base_url(format!("{base}/v1"))
+            .route(Route::Responses),
+    };
+    Ok(catalog.connect_with(&format!("opencode-go/{model}"), options)?)
 }
 
 pub(crate) async fn agent_from_env() -> Result<(Agent, bool), Error> {
@@ -189,20 +186,29 @@ pub(crate) async fn agent_from_env() -> Result<(Agent, bool), Error> {
     let (model, go): (DynModel<Completion>, bool) = match std::env::var("OPENCODE_GO_API_KEY") {
         Ok(key) => {
             let id = std::env::var("OPENCODE_GO_MODEL")?;
-            let model = go_model(key, id.clone(), &std::env::var("OPENCODE_GO_ENDPOINT")?)?;
-            limits = match model_catalog()?.get("opencode-go", &id).await {
-                Ok(info) => ModelLimits {
-                    context: info
-                        .as_ref()
-                        .and_then(|info| info.context_length)
-                        .map(u64::from),
-                    output: info.and_then(|info| info.max_output_tokens).map(u64::from),
-                },
-                Err(_) => {
-                    eprintln!("Go model metadata unavailable; using configured output limit");
-                    ModelLimits::default()
+            let endpoint = std::env::var("OPENCODE_GO_ENDPOINT")?;
+            let catalog = match model_catalog()?.load().await {
+                Ok((catalog, skipped)) => {
+                    if !skipped.is_empty() {
+                        eprintln!(
+                            "Model catalog skipped {} unsupported vendors or rows",
+                            skipped.len()
+                        );
+                    }
+                    catalog
+                }
+                Err(error) => {
+                    eprintln!("Go model catalog unavailable ({error}); using built-in facts");
+                    Catalog::builtin().clone()
                 }
             };
+            let model = go_model(&catalog, key, id.clone(), &endpoint)?;
+            if let Ok(info) = catalog.resolve(&format!("opencode-go/{id}")) {
+                limits = ModelLimits {
+                    context: info.spec.context_window.map(u64::from),
+                    output: info.spec.max_output_tokens.map(u64::from),
+                };
+            }
             eprintln!(
                 "Go model {id}: context={:?}, output={:?}",
                 limits.context, limits.output
@@ -210,10 +216,12 @@ pub(crate) async fn agent_from_env() -> Result<(Agent, bool), Error> {
             (model, true)
         }
         Err(std::env::VarError::NotPresent) => {
-            let provider = OpenAI::from_env()?;
             let model =
                 std::env::var("OPENAI_MODEL").unwrap_or_else(|_| openai::GPT_4O_MINI.into());
-            (provider.completion(model).into(), false)
+            (
+                Catalog::builtin().connect(&format!("openai/{model}"))?,
+                false,
+            )
         }
         Err(error) => return Err(error.into()),
     };

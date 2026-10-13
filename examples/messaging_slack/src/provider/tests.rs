@@ -56,6 +56,14 @@ async fn all_go_protocols_stream_with_correct_auth_and_conversation_headers()
         ("responses", responses, false),
         ("messages", messages, true),
     ] {
+        let (catalog, skipped) = Catalog::from_models_dev(
+            &json!({"opencode-go":{"models":{
+                "fixture":{"limit":{"context":100_000,"output":2048},
+                    "modalities":{"input":["text"]},"cost":{"input":1,"output":2}}
+            }}})
+            .to_string(),
+        )?;
+        assert!(skipped.is_empty());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("http://{}/v1/{route}", listener.local_addr()?);
         let server = tokio::spawn(async move {
@@ -88,14 +96,19 @@ async fn all_go_protocols_stream_with_correct_auth_and_conversation_headers()
             }
             Ok::<_, std::io::Error>(requests)
         });
-        let agent = AgentBuilder::new(go_model("offline-go-key".into(), "fixture".into(), &url)?)
-            .memory(InMemoryConversationMemory::new())
-            .max_tokens(4096)
-            .add_hook(ModelLimits {
-                context: Some(100_000),
-                output: Some(2048),
-            })
-            .build();
+        let agent = AgentBuilder::new(go_model(
+            &catalog,
+            "offline-go-key".into(),
+            "fixture".into(),
+            &url,
+        )?)
+        .memory(InMemoryConversationMemory::new())
+        .max_tokens(4096)
+        .add_hook(ModelLimits {
+            context: Some(100_000),
+            output: Some(2048),
+        })
+        .build();
         for session in ["conversation-one", "conversation-one", "conversation-two"] {
             let items = SESSION
                 .scope(session.into(), async {
@@ -108,6 +121,15 @@ async fn all_go_protocols_stream_with_correct_auth_and_conversation_headers()
                 })
                 .await?;
             assert!(items.iter().any(|item|matches!(item,MultiTurnStreamItem::FinalResponse(reply) if reply.output()=="reply")));
+            if route != "chat/completions" {
+                assert!(
+                    items.iter().any(|item| matches!(item,
+                        MultiTurnStreamItem::FinalResponse(reply) if reply.usage.cost.as_ref()
+                            .is_some_and(|cost| (cost.total - 0.000003).abs() < 1e-12)
+                    )),
+                    "catalog prices must reach the streamed reply"
+                );
+            }
         }
         let requests = tokio::time::timeout(Duration::from_secs(5), server).await???;
         for ((start, headers, body), session) in
