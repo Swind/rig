@@ -263,15 +263,13 @@ async fn qdrant_originals_retry_reopen_clear_and_tool() -> anyhow::Result<()> {
         .prompt("target capture-success")
         .conversation(captured_id.clone())
         .await?;
-    anyhow::ensure!(response.output == "context");
+    anyhow::ensure!(response.output() == "context");
     let captured = reopened.load(&captured_id).await?;
     anyhow::ensure!(
         captured.len() == 2 && captured.first() == Some(&Message::user("target capture-success"))
     );
-    anyhow::ensure!(
-        matches!(captured.last(), Some(Message::Assistant { content, .. })
-        if matches!(content.as_slice(), [rig_core::completion::AssistantContent::Text(text)] if text.text == "context"))
-    );
+    anyhow::ensure!(matches!(captured.last(), Some(Message::Assistant(turn))
+        if matches!(turn.content.as_slice(), [rig_core::completion::AssistantContent::Text(text)] if text.text == "context")));
     let failed_id = ConversationId::new("failed-memory");
     anyhow::ensure!(
         agent

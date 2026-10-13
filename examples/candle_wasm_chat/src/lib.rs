@@ -4,6 +4,7 @@ use std::cell::RefCell;
 
 use rig::{
     agent::{Agent, AgentBuilder},
+    candle::extension::CandleOptions,
     candle::{CandleModel, GgufModelData},
     message::Message,
 };
@@ -80,7 +81,7 @@ pub fn initialize() -> Result<(), JsValue> {
         )
         .temperature(0.0)
         .max_tokens(32)
-        .additional_params(serde_json::json!({"repeat_penalty": 1.0}))
+        .provider_option(CandleOptions::default().repeat_penalty(1.0))
         .build();
     CHAT_STATE.with(|state| {
         state.replace(Some(ChatState {
@@ -111,7 +112,7 @@ pub async fn chat(message: String) -> Result<String, JsValue> {
         .agent
         .chat(message, &mut state.history)
         .await
-        .map(|response| response.output);
+        .map(|response| response.output());
     CHAT_STATE.with(|slot| slot.replace(Some(state)));
     result.map_err(|error| js_error(BrowserModelError::Inference(error.to_string())))
 }

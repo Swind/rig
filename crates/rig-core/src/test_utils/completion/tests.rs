@@ -1,53 +1,36 @@
 use super::*;
 use crate::{
     error::ErrorKind,
-    message::Message,
     operation::Finish,
     streaming::{Item, StreamEvent},
 };
 use futures::StreamExt;
 
-fn request(prompt: &str) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: vec![Message::user(prompt)],
-        documents: Vec::new(),
-        tools: Vec::new(),
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
-}
-
 #[tokio::test]
 async fn completion_consumes_scripted_turns_and_records_requests() {
     let model = MockCompletionModel::from_turns([
-        MockTurn::text("first").with_message_id("msg_1"),
+        MockTurn::text("first"),
         MockTurn::tool_call("tool_1", "calculator", serde_json::json!({"x": 1}))
             .with_call_id("call_1"),
     ]);
 
     let first = model
-        .call(request("hello"))
+        .call(CompletionRequest::new("hello"))
         .await
         .expect("first scripted turn should succeed");
-    assert_eq!(first.message_id.as_deref(), Some("msg_1"));
     assert!(matches!(
         first.choice.first(),
         Some(AssistantContent::Text(text)) if text.text == "first"
     ));
 
     let second = model
-        .call(request("use a tool"))
+        .call(CompletionRequest::new("use a tool"))
         .await
         .expect("second scripted turn should succeed");
     assert!(matches!(
         second.choice.first(),
         Some(AssistantContent::ToolCall(tool_call))
-            if tool_call.id.provider().map(|provider| provider.call_id.as_str()) == Some("call_1")
+            if tool_call.id.provider().map(|provider| provider.as_str()) == Some("call_1")
     ));
 
     assert_eq!(model.request_count(), 2);
@@ -71,13 +54,13 @@ async fn completion_attaches_scripted_raw_and_its_own_turn_when_unscripted() {
     ]);
 
     let scripted = model
-        .call(request("hello"))
+        .call(CompletionRequest::new("hello"))
         .await
         .expect("first scripted turn should succeed");
     assert_eq!(scripted.raw, payload);
 
     let unscripted = model
-        .call(request("hello"))
+        .call(CompletionRequest::new("hello"))
         .await
         .expect("second scripted turn should succeed");
     assert_eq!(unscripted.raw, expected_unscripted);
@@ -104,7 +87,9 @@ async fn stream_terminal_raw_is_the_scripted_terminal_serialized() {
         }),
     ]]);
 
-    let mut stream = model.stream(request("hello")).expect("stream should open");
+    let mut stream = model
+        .stream(CompletionRequest::new("hello"))
+        .expect("stream should open");
     while stream.next().await.is_some() {}
     let response = stream.finish().await.expect("the reply ended");
     let typed: Finish = serde_json::from_value(response.raw.clone()).expect("the end");
@@ -121,7 +106,7 @@ async fn missing_completion_turn_returns_provider_error() {
     let model = MockCompletionModel::from_turns([]);
 
     let err = model
-        .call(request("hello"))
+        .call(CompletionRequest::new("hello"))
         .await
         .expect_err("missing turn should error");
 
@@ -135,7 +120,6 @@ async fn missing_completion_turn_returns_provider_error() {
 #[tokio::test]
 async fn stream_yields_scripted_events_and_records_requests() {
     let model = MockCompletionModel::from_stream_turns([[
-        MockStreamEvent::message_id("msg_stream"),
         MockStreamEvent::text("hel"),
         MockStreamEvent::text("lo"),
         MockStreamEvent::tool_call_name_delta("call_1", "calculator"),
@@ -145,7 +129,7 @@ async fn stream_yields_scripted_events_and_records_requests() {
     ]]);
 
     let mut stream = model
-        .stream(request("stream"))
+        .stream(CompletionRequest::new("stream"))
         .expect("stream should be created");
 
     let mut text = String::new();
@@ -168,10 +152,9 @@ async fn stream_yields_scripted_events_and_records_requests() {
     let call = call.expect("the call ended");
     assert_eq!(call.id.to_string(), "call_1");
     assert_eq!(call.function.name, "calculator");
-    assert_eq!(call.function.arguments, serde_json::json!({"x": 1}));
+    assert_eq!(call.function.arguments_value(), serde_json::json!({"x": 1}));
     let response = stream.finish().await.expect("the reply ended");
     assert_eq!(response.usage.total_tokens, Some(7));
-    assert_eq!(response.message_id.as_deref(), Some("msg_stream"));
     assert_eq!(model.request_count(), 1);
 }
 
@@ -179,7 +162,7 @@ async fn stream_yields_scripted_events_and_records_requests() {
 async fn stream_error_event_is_returned() {
     let model = MockCompletionModel::from_stream_turns([[MockStreamEvent::error("boom")]]);
     let mut stream = model
-        .stream(request("stream"))
+        .stream(CompletionRequest::new("stream"))
         .expect("stream should be created");
 
     let err = stream

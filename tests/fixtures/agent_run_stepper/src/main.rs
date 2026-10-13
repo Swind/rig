@@ -21,7 +21,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use rig_agent::run::{AgentRun, AgentRunStep, ModelTurn, RunSpec, prepare_request};
+use rig_agent::run::{AgentRun, AgentRunStep, ModelTurn, PendingToolCall, RunSpec, prepare_request};
 use rig_agent::tool::{ToolCatalog, ToolSet};
 use rig_agent::bus::{Bus, BusDriver, ModelHandle};
 use rig_core::completion::{
@@ -33,7 +33,6 @@ use rig_core::message::{Message, ToolCall, ToolFunction, ToolName};
 use rig_core::serve::adapters::ModelAdapter;
 use rig_core::test_utils::{MockFrame, MockScript};
 use rig_core::tool::{DynamicTool, ToolContext, ToolOutput};
-use rig_core::transcript;
 use rig_core::error::ProviderError;
 use rig_core::wire::Mode;
 
@@ -102,7 +101,7 @@ impl Transport<MockScript> for Scripted {
             vec![AssistantContent::text("done")]
         };
         let document = serde_json::json!({ "provider": "fixture" });
-        let response = CompletionResponse::new(choice, Usage::default(), "fixture", document.clone());
+        let response = CompletionResponse::new(choice, Usage::default(), rig_core::message::Origin::new("test.api", "fixture", ""), document.clone());
         Opening::ready(
             Opened::new(futures::stream::iter([Ok(MockFrame::Response(Box::new(response)))]))
                 .with_document(document),
@@ -112,7 +111,7 @@ impl Transport<MockScript> for Scripted {
 
 fn add_tool() -> DynamicTool {
     DynamicTool::new(
-        "add",
+        ToolName::new("add").expect("tool name"),
         "Add x and y",
         serde_json::json!({
             "type": "object",
@@ -177,39 +176,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None,
                 )?;
                 run.advertise_tools(turn, prepared.tools.clone());
-                let executable = prepared.executable_tool_names.clone();
-                let allowed = prepared.allowed_tool_names.clone();
+                let policy = prepared.policy.clone();
                 let request = prepared
                     .apply(CompletionRequest::new(prompt));
                 let response = drive(model.call(request), &mut driver)?;
                 model_calls += 1;
                 run.model_response(ModelTurn::new(
-                    None,
+                    response.head(),
                     response.choice,
                     response.usage,
-                    executable,
-                    allowed,
+                    policy,
                     response.raw,
                 ))?;
             }
             AgentRunStep::CallTools { calls } => {
-                let mut results = Vec::with_capacity(calls.len());
                 for call in calls {
-                    let name = call.tool_call.function.name.clone();
-                    let arguments = call.tool_call.function.arguments.to_string();
-                    let result =
-                        block_on(catalog.execute(&name, &arguments, &mut ToolContext::new()));
-                    assert!(result.is_success(), "dispatch by name through the catalog");
-                    tool_calls += 1;
-                    results.push(transcript::tool_result_output(
-                        call.tool_call.id.clone(),
-                        name,
-                        result.output().clone(),
-                    ));
+                    match call {
+                        PendingToolCall::Execute(call) => {
+                            let arguments = call.arguments().to_string();
+                            let result = block_on(catalog.execute(
+                                call.name(),
+                                &arguments,
+                                &mut ToolContext::new(),
+                            ));
+                            assert!(result.is_success(), "dispatch by name through the catalog");
+                            tool_calls += 1;
+                            run.answer(call.answer(result))?;
+                        }
+                        PendingToolCall::Malformed(call) => run.answer(call.answer(None))?,
+                        other => panic!("unsupported pending call {other:?}"),
+                    }
                 }
-                run.tool_results(results)?;
             }
-            AgentRunStep::Done(response) => break response.output,
+            AgentRunStep::Done(response) => break response.output(),
         }
     };
 

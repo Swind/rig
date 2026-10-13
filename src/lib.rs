@@ -60,8 +60,7 @@ pub mod core {
 
 /// The classic runtime's effect bus (`rig_agent::bus`): the dispatcher,
 /// the registrar, the driver, the typed views. What a handler implements is
-/// `rig::core::serve`; the vocabulary is `rig::core::effect`. Effects
-/// without the classic agent are `rig-ecs`'s.
+/// `rig::core::serve`; the vocabulary is `rig::core::effect`.
 #[cfg(feature = "agent")]
 #[cfg_attr(docsrs, doc(cfg(feature = "agent")))]
 pub mod bus {
@@ -159,7 +158,7 @@ pub mod tool {
     pub use rig_core::tool::builtin;
     pub use rig_core::tool::{
         ContextValue, DynamicTool, ErasedTool, Tool, ToolContext, ToolContextError, ToolEmbedding,
-        tool_definition,
+        tool_definition, tool_name,
     };
     pub use rig_core::tool::{
         IntoToolOutput, ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult,

@@ -1,11 +1,10 @@
 //! Shared fixtures, tiny tools, and durable assertions for ignored smoke tests.
-#![allow(dead_code)]
 
 use futures::StreamExt;
 
 use rig_agent::agent::MultiTurnStreamItem;
 
-use rig_agent::agent::StreamingError;
+use rig_agent::completion::PromptError;
 
 use rig_agent::agent::StreamingResult;
 
@@ -19,8 +18,6 @@ use rig_core::completion::CompletionResponse;
 
 use rig_core::streaming::{Item, StreamEvent};
 
-use rig_core::streaming::StreamedUserContent;
-
 use rig_core::streaming::CompletionStream;
 
 use rig_core::tool::PortableTool;
@@ -30,7 +27,6 @@ use rig_core::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 /// System instruction for the basic completion smoke scenario.
 pub const BASIC_PREAMBLE: &str = "You are a concise assistant. Answer directly.";
@@ -174,23 +170,6 @@ pub fn smoke_structured_output_value() -> serde_json::Value {
         "category": "Technology",
         "summary": "A focused local meetup for Rust developers."
     })
-}
-
-/// Derive the synthetic output-tool name from the serialized schema's SHA-256 prefix.
-pub fn ecs_synthetic_output_tool_name<T>() -> String
-where
-    T: JsonSchema,
-{
-    let schema = schemars::schema_for!(T);
-    let mut hasher = Sha256::new();
-    hasher.update(schema.as_value().to_string().as_bytes());
-    let prefix = hasher
-        .finalize()
-        .iter()
-        .take(4)
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("__rig_output_{prefix}")
 }
 
 /// Person fields used to test required extraction properties.
@@ -414,7 +393,7 @@ impl Tool for BetaSignal {
 /// Build a named tool definition accepting an empty JSON object.
 pub fn zero_arg_tool_definition(name: &str) -> ToolDefinition {
     ToolDefinition {
-        name: name.to_owned(),
+        name: rig_core::message::ToolName::new(name).expect("tool name"),
         description: format!("A zero-argument tool named {name}."),
         parameters: json!({
             "type": "object",
@@ -743,7 +722,7 @@ impl rig_agent::agent::AgentHook for EscalateCapOnTruncation {
 /// Drain the stream, propagating errors and requiring an agent final response.
 pub async fn collect_stream_final_response(
     stream: &mut StreamingResult,
-) -> Result<String, StreamingError> {
+) -> Result<String, PromptError> {
     let mut final_response = None;
 
     while let Some(item) = stream.next().await {
@@ -759,7 +738,7 @@ pub async fn collect_stream_final_response(
 /// response and a recorded provider completion call.
 pub async fn collect_stream_final_response_and_provider_final(
     stream: &mut StreamingResult,
-) -> Result<(String, rig_agent::run::response::CompletionCall), StreamingError> {
+) -> Result<(String, rig_agent::run::response::CompletionCall), PromptError> {
     let mut final_response = None;
     let mut provider_final = None;
 
@@ -796,7 +775,7 @@ pub async fn assert_stream_contains_zero_arg_tool_call_named(
         }) = chunk.expect("stream item should be ok")
             && tool_call.function.name == expected_name
         {
-            assert_eq!(tool_call.function.arguments, json!({}));
+            assert_eq!(tool_call.function.arguments_value(), json!({}));
             saw_matching_tool_call = true;
         }
     }
@@ -854,10 +833,8 @@ impl StreamObservation {
 pub struct ToolCallRecord {
     /// Tool name emitted by the provider.
     pub name: String,
-    /// Provider signature associated with the tool call, when present.
-    pub signature: Option<String>,
-    /// Additional provider parameters associated with the call, when present.
-    pub additional_params: Option<serde_json::Value>,
+    /// The provider item the call was decoded from, when it kept one.
+    pub native: Option<rig_core::message::Native>,
 }
 
 /// Observations from a raw provider completion stream before agent tool execution.
@@ -929,12 +906,11 @@ pub async fn collect_stream_observation(stream: &mut StreamingResult) -> StreamO
                     .push(tool_call.function.name.clone().into());
                 observation.tool_call_records.push(ToolCallRecord {
                     name: tool_call.function.name.into(),
-                    signature: tool_call.signature,
-                    additional_params: tool_call.additional_params,
+                    native: tool_call.native,
                 });
                 observation.events.push("tool_call");
             }
-            Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult { .. })) => {
+            Ok(MultiTurnStreamItem::ToolResult { .. }) => {
                 observation.tool_results += 1;
                 observation.final_turn_text.clear();
                 observation.events.push("tool_result");
@@ -1269,8 +1245,7 @@ where
                 observation.tool_calls.push(tool_call.clone());
                 observation.tool_call_records.push(ToolCallRecord {
                     name: tool_call.function.name.into(),
-                    signature: tool_call.signature,
-                    additional_params: tool_call.additional_params,
+                    native: tool_call.native,
                 });
                 observation.events.push("tool_call");
             }
@@ -1623,7 +1598,7 @@ pub fn assert_raw_stream_tool_call_arguments_are_objects(
 
     for tool_call in &observation.tool_calls {
         assert!(
-            tool_call.function.arguments.is_object(),
+            tool_call.function.invalid_arguments.is_none(),
             "tool call `{}` must surface object arguments, got {:?}",
             tool_call.function.name,
             tool_call.function.arguments,

@@ -16,21 +16,23 @@
 //!     .expiry(CacheExpiry::ttl(Duration::from_secs(600)));
 //! ```
 
-use crate::wire::Flow;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::completion::gemini_api_types::{Content, Part, Role, Tool, ToolConfig};
+use serde_json::{Value, json};
+
 use crate::error::EncodeError;
 use crate::error::ProviderError;
-use crate::operation;
+use crate::json_utils::Lenient;
+use crate::operation::Whole;
 use crate::providers::internal::{
     wire::{classify_or, classify_untyped_line},
     with_query_pairs,
 };
 use crate::wire::{
-    Body, Decoder, Descriptor, Encoded, Framing, Mode, Out, Wire, WireEvent, WireFrame,
+    Body, Call, Decoder, Descriptor, Encoded, Flow, Framing, Free, Mode, Operation, Out, Wire,
+    WireEvent, WireFrame,
 };
 
 /// The `cachedContents` collection path.
@@ -94,13 +96,13 @@ pub struct NewCachedContent {
     /// uses the cache must name the same model.
     model: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    contents: Vec<Content>,
+    contents: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system_instruction: Option<Content>,
+    system_instruction: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<Tool>>,
+    tools: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_config: Option<ToolConfig>,
+    tool_config: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -124,39 +126,39 @@ impl NewCachedContent {
 
     /// Append a user-role text content block.
     pub fn content(mut self, text: impl Into<String>) -> Self {
-        self.contents.push(Content {
-            parts: vec![Part::from(text.into())],
-            role: Some(Role::User),
-        });
+        let text = text.into();
+        self.contents
+            .push(json!({ "parts": [{ "text": text, "thought": false }], "role": "user" }));
         self
     }
 
-    /// Append an already-built content block (multimodal payloads).
-    pub fn content_block(mut self, content: Content) -> Self {
+    /// Append a content block in Gemini's REST JSON (multimodal payloads).
+    pub fn content_block(mut self, content: Value) -> Self {
         self.contents.push(content);
         self
     }
 
     pub fn system_instruction(mut self, text: impl Into<String>) -> Self {
-        self.system_instruction = Some(Content {
-            parts: vec![Part::from(text.into())],
-            role: Some(Role::Model),
-        });
+        let text = text.into();
+        self.system_instruction =
+            Some(json!({ "parts": [{ "text": text, "thought": false }], "role": "model" }));
         self
     }
 
-    /// Set the tools inherited by requests using this cache.
+    /// Set the tools inherited by requests using this cache, in Gemini's
+    /// REST JSON.
     /// Requests must not supply their own tools. Cached function declarations
     /// require a caller-managed tool loop; provider-hosted tools do not.
-    pub fn tools(mut self, tools: Vec<Tool>) -> Self {
+    pub fn tools(mut self, tools: Vec<Value>) -> Self {
         self.tools = Some(tools);
         self
     }
 
-    /// Set the tool configuration inherited by requests using this cache.
+    /// Set the tool configuration inherited by requests using this cache,
+    /// in Gemini's REST JSON.
     /// Requests must not supply their own tool configuration. May be set
     /// without a tool set.
-    pub fn tool_config(mut self, tool_config: ToolConfig) -> Self {
+    pub fn tool_config(mut self, tool_config: Value) -> Self {
         self.tool_config = Some(tool_config);
         self
     }
@@ -227,7 +229,7 @@ pub struct CachedContent {
     pub usage_metadata: Option<CachedContentUsage>,
 }
 
-/// One `cachedContents` verb: what [`operation::ContextCache`] sends.
+/// One `cachedContents` verb: what [`ContextCache`] sends.
 #[derive(Debug)]
 pub enum CachedContentRequest {
     /// `POST /v1beta/cachedContents`; answers with the resource.
@@ -318,8 +320,26 @@ impl CachedContentReply {
     }
 }
 
+/// Creates, reads, lists, updates expiry, or deletes explicit context caches.
+/// Requests use [`CachedContentRequest`]; a listing reads one page per call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextCache;
+
+impl Operation for ContextCache {
+    type Request = CachedContentRequest;
+    type Event = std::convert::Infallible;
+    type End = CachedContentReply;
+    type Response = CachedContentReply;
+    type Fold = Whole<Self>;
+    type Emit = Free;
+
+    fn fold(_request: &Self::Request, _call: &mut Call<'_>) -> Self::Fold {
+        Whole::new()
+    }
+}
+
 /// Gemini's `cachedContents` resource: the wire for
-/// [`operation::ContextCache`].
+/// [`ContextCache`].
 ///
 /// Built by [`Gemini::cached_contents`](super::Gemini::cached_contents); the
 /// calls are the inherent methods of a [`Model`](crate::Model) over it.
@@ -359,6 +379,73 @@ impl CachedContents {
     }
 }
 
+/// Set `name`, a `cachedContents/<id>` handle, as the prefix `body` reads.
+///
+/// # Errors
+///
+/// When `name` is not a handle, `body` names another one, or it sets a
+/// system instruction, tools or a tool choice, which the cache owns.
+pub fn with_cached_content(
+    body: &mut serde_json::Map<String, Value>,
+    name: &str,
+) -> Result<(), EncodeError> {
+    let fail = |message: String| Err(EncodeError::request(message));
+    if !name.starts_with("cachedContents/") {
+        return fail(format!(
+            "gemini cached content handle should look like `cachedContents/<id>`, got `{name}`"
+        ));
+    }
+    if let Some(existing) = body
+        .get("cachedContent")
+        .and_then(Value::as_str)
+        .filter(|existing| *existing != name)
+    {
+        return fail(format!(
+            "a Gemini request set cached content twice, to `{existing}` and `{name}`: set it \
+             one way or the other"
+        ));
+    }
+    let conflicts: Vec<&str> = [
+        (
+            &super::completion::SYSTEM_INSTRUCTION[..],
+            "a system instruction (preamble)",
+        ),
+        (&["tools"][..], "tools"),
+        (&super::completion::TOOL_CONFIG[..], "a tool choice"),
+    ]
+    .into_iter()
+    .filter_map(|(spellings, what)| super::completion::present(body, spellings).map(|_| what))
+    .collect();
+    if conflicts.is_empty() {
+        body.insert("cachedContent".to_owned(), Value::String(name.to_owned()));
+        return Ok(());
+    }
+    // Cached function declarations need caller-side dispatch; hosted tools
+    // run on Gemini's side.
+    let tools = body
+        .get("tools")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let declares_functions = tools.iter().any(|tool| {
+        !tool.arr("functionDeclarations").is_empty()
+            || !tool.arr("function_declarations").is_empty()
+    });
+    let caveat = match declares_functions {
+        true => {
+            " Function declarations in a cache are declarations only: an `Agent` dispatches \
+             only tools it advertised, so a cached function tool runs only when you drive \
+             `GenerateContent` yourself. Hosted tools such as `codeExecution` are fine to cache."
+        }
+        false => "",
+    };
+    fail(format!(
+        "a Gemini request using cached content `{name}` also set {}. The cached content owns \
+         the system instruction, tools and tool choice of every request that uses it: move \
+         them into the cache, or drop the cache handle.{caveat}",
+        conflicts.join(" and ")
+    ))
+}
+
 impl super::GeminiConfig {
     /// Build a wire for Gemini's explicit context cache (`cachedContents`).
     pub(crate) fn cached_contents(&self) -> CachedContents {
@@ -367,10 +454,11 @@ impl super::GeminiConfig {
 }
 
 impl Wire for CachedContents {
-    type Op = operation::ContextCache;
+    type Op = ContextCache;
     type Payload = crate::wire::Encoded;
     type Frame = crate::wire::WireFrame;
     type Decoder<'id> = CachedContentsDecoder;
+    type Reassembler = crate::wire::document::Unreassembled;
 
     fn describe(&self) -> Descriptor<'_> {
         Descriptor::new(super::PROVIDER_NAME)
@@ -414,7 +502,7 @@ impl Wire for CachedContents {
 /// Decodes one `cachedContents` reply.
 pub struct CachedContentsDecoder;
 
-impl<'id> Decoder<'id, operation::ContextCache> for CachedContentsDecoder {
+impl<'id> Decoder<'id, ContextCache> for CachedContentsDecoder {
     type Event = CachedContentReply;
 
     /// Classify a page, empty acknowledgement, or resource.
@@ -429,14 +517,14 @@ impl<'id> Decoder<'id, operation::ContextCache> for CachedContentsDecoder {
     fn decode(
         &mut self,
         reply: Self::Event,
-        out: Out<'id, operation::ContextCache>,
+        out: Out<'id, ContextCache>,
     ) -> Result<Flow, ProviderError> {
         Ok(out.end(reply))
     }
 
     /// A reply with no body at all is an acknowledgement: the status
     /// already answered.
-    fn eof(&mut self, out: Out<'id, operation::ContextCache>) -> Result<Flow, ProviderError> {
+    fn eof(&mut self, out: Out<'id, ContextCache>) -> Result<Flow, ProviderError> {
         Ok(out.end(CachedContentReply::Acknowledged))
     }
 }

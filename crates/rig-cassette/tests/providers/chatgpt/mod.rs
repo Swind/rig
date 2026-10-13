@@ -6,8 +6,6 @@ mod cassette {
     mod codex_sessions;
     mod codex_tool_args;
     mod codex_tool_choice;
-    mod http_errors;
-    mod noninteractive_oauth;
     mod raw_capture_matrix;
     mod raw_completion_parity_matrix;
     mod raw_stream_capture_matrix;
@@ -84,7 +82,7 @@ async fn live_provider(http: &DynHttpClient) -> OpenAIConfig {
 }
 
 pub(crate) async fn live_client() -> OpenAiModels {
-    let http = rig::rig_reqwest::shared();
+    let http = rig_test_support::cassettes::local_http();
     OpenAiModels::new(live_provider(&http).await, http)
 }
 

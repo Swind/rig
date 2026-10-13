@@ -125,7 +125,8 @@ const MIN_IDLE_SECS: u64 = 60;
 /// The `Auto` policy's parameters. The price ratios default to
 /// gemini-3.8-flash standard prices relative to its input price (cached read
 /// $0.075 and storage $0.50 per 1M tokens per hour, against $0.75 input);
-/// set them for other models or tiers. Nothing here reads a model name.
+/// [`AutoCache::for_spec`] reads the cached-read ratio of another model
+/// from its catalog spec. The catalog holds no storage price.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AutoCache {
     /// The shortest TTL a new cache gets.
@@ -156,6 +157,32 @@ impl Default for AutoCache {
             min_gain: 256,
             cached_ratio: 0.1,
             storage_ratio_per_hour: 0.5 / 0.75,
+        }
+    }
+}
+
+impl AutoCache {
+    /// The default policy with the cached-read ratio of `spec`'s pricing,
+    /// such as the spec a model carries ([`DynModel::spec`]). A spec with no
+    /// usable price keeps the default ratio.
+    ///
+    /// [`DynModel::spec`]: crate::DynModel::spec
+    pub fn for_spec(spec: &crate::catalog::ModelSpec) -> Self {
+        Self::priced(spec.pricing.as_ref())
+    }
+
+    /// The default policy with the cached-read ratio of `pricing`. Without
+    /// a cached-read price, with a negative one, or with no positive input
+    /// price to divide by, the default ratio stays.
+    fn priced(pricing: Option<&crate::catalog::Pricing>) -> Self {
+        let ratio = pricing
+            .and_then(|pricing| Some((pricing.cache_read?, pricing.input)))
+            .filter(|(read, input)| *read >= 0.0 && *input > 0.0)
+            .map(|(read, input)| read / input);
+        let default = Self::default();
+        Self {
+            cached_ratio: ratio.unwrap_or(default.cached_ratio),
+            ..default
         }
     }
 }
@@ -515,6 +542,16 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// `fragment` with its keys sorted: a history replays a provider part with
+/// the key order it arrived in, which a recording does not keep, so the
+/// digests read the content, not its spelling.
+fn canonical(fragment: &str) -> std::borrow::Cow<'_, str> {
+    serde_json::from_str::<serde_json::Value>(fragment)
+        .map_or(std::borrow::Cow::Borrowed(fragment), |value| {
+            std::borrow::Cow::Owned(crate::json_utils::to_canonical_string(&value))
+        })
+}
+
 /// `d[k]`: the digest of the model, the prefix and `contents[..k]`.
 pub(crate) fn digests(model: &str, parsed: &Parsed) -> Vec<String> {
     let mut hasher = Sha256::new();
@@ -522,7 +559,7 @@ pub(crate) fn digests(model: &str, parsed: &Parsed) -> Vec<String> {
     for field in &parsed.prefix {
         hasher.update([0u8]);
         if let Some(raw) = field {
-            hasher.update(raw.get().as_bytes());
+            hasher.update(canonical(raw.get()).as_bytes());
         }
     }
     let mut state = hasher.finalize().to_vec();
@@ -530,7 +567,7 @@ pub(crate) fn digests(model: &str, parsed: &Parsed) -> Vec<String> {
     for content in &parsed.contents {
         let mut hasher = Sha256::new();
         hasher.update(&state);
-        hasher.update(content.get().as_bytes());
+        hasher.update(canonical(content.get()).as_bytes());
         state = hasher.finalize().to_vec();
         out.push(hex(&state));
     }
@@ -547,7 +584,7 @@ fn estimate(json: &str) -> u64 {
     fn scrub(value: &mut serde_json::Value) {
         match value {
             serde_json::Value::Object(map) => {
-                map.remove("thoughtSignature");
+                map.shift_remove("thoughtSignature");
                 map.values_mut().for_each(scrub);
             }
             serde_json::Value::Array(items) => items.iter_mut().for_each(scrub),
@@ -956,3 +993,6 @@ impl CacheBook {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

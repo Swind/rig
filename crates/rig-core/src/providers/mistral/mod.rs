@@ -1,8 +1,7 @@
-//! Mistral's model identifiers and its own view of a reply.
+//! Mistral's model identifiers.
 //!
 //! [`from_env`] and [`new`] build a client on the [`MISTRAL`](crate::providers::openai::wire::MISTRAL) dialect.
-//! [`CompletionResponse`] reads provider fields from a normalized chat response's
-//! `raw` value; transcription metadata remains in its response's `raw` value.
+//! Provider fields of a reply stay in the response's `raw` value.
 //!
 //! ```no_run
 //! use rig_core::providers::mistral;
@@ -18,10 +17,15 @@
 
 pub mod completion;
 pub mod embedding;
+pub mod extension;
 pub mod transcription;
 
 pub use completion::*;
 pub use embedding::*;
 pub use transcription::*;
+
+/// The provider key: the dialect name, a reply's `Origin::provider` and
+/// the typed provider-options key.
+pub const PROVIDER_NAME: &str = "mistral";
 
 crate::client::macros::openai_vendor!(crate::providers::openai::wire::MISTRAL, "Mistral");

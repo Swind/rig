@@ -2,25 +2,18 @@
 //! dispatch — at run start, at model selection, before the completion
 //! call. Nothing reaches the wire, so no cassette exists to record; the
 //! model is a mock that is never asked, and the golden is a header over an
-//! empty record. The run ends in `PromptCancelled` with the hook's reason.
+//! empty record. The run ends in `Cancelled` with the hook's reason.
 
 use rig::agent::AgentBuilder;
-use rig::completion::PromptError;
 use rig::test_utils::MockCompletionModel;
 use rig_cassette::agent::AgentReplayExt;
 
+use super::cancelled_reason;
 use super::golden_recovery::Add;
 use crate::goldens::{
     RecordSettled, STOP_AT_COMPLETION_CALL, STOP_AT_MODEL_SELECT, STOP_AT_START,
     StopAtCompletionCall, StopAtModelSelect, StopAtStart,
 };
-
-fn cancelled_reason(error: &PromptError) -> &str {
-    match error {
-        PromptError::PromptCancelled { reason, .. } => reason,
-        other => panic!("a cancelled run, not {other:?}"),
-    }
-}
 
 async fn stops_before_any_dispatch(
     hook: impl rig::agent::AgentHook + 'static,

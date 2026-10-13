@@ -65,12 +65,12 @@ async fn models_from_clients_and_strings_hold_a_conversation() -> anyhow::Result
     let mut history = vec![Message::user("Capital of France?")];
     history.extend(model.call(history.clone()).await?.message());
     anyhow::ensure!(history.len() == 2);
-    anyhow::ensure!(matches!(history.last(), Some(Message::Assistant { .. })));
+    anyhow::ensure!(matches!(history.last(), Some(Message::Assistant(_))));
     responses.assert_calls_async(2).await;
 
     let deepseek = deepseek::from_env()?.chat(deepseek::DEEPSEEK_V4_FLASH);
     anyhow::ensure!(deepseek.id() == Some(deepseek::DEEPSEEK_V4_FLASH));
-    let any = ProviderRef::parse("deepseek:deepseek-chat")?.completion_model()?;
+    let any = ProviderRef::parse("deepseek/deepseek-chat")?.completion_model()?;
     anyhow::ensure!(any.name() == "deepseek" && any.id() == Some("deepseek-chat"));
 
     let model = OpenAI::from_env()?.embedding(openai::TEXT_EMBEDDING_3_SMALL, None);

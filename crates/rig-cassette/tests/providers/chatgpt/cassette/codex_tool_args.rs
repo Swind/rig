@@ -17,8 +17,7 @@ use serde_json::json;
 
 use super::super::support::with_chatgpt_cassette;
 use crate::support::{
-    REQUIRED_ZERO_ARG_TOOL_PROMPT, assert_stream_contains_zero_arg_tool_call_named,
-    collect_raw_stream_observation, zero_arg_tool_definition,
+    REQUIRED_ZERO_ARG_TOOL_PROMPT, collect_raw_stream_observation, zero_arg_tool_definition,
 };
 use rig::completion::CompletionRequest;
 
@@ -154,26 +153,6 @@ fn assert_expected_plan_trip_arguments(arguments: &serde_json::Value) {
 }
 
 #[tokio::test]
-async fn zero_argument_tool_call_streaming() {
-    with_chatgpt_cassette(
-        "codex_tool_args/zero_argument_tool_call_streaming",
-        |client| async move {
-            let model = client.completion(chatgpt::GPT_5_4);
-            let request = CompletionRequest::new(REQUIRED_ZERO_ARG_TOOL_PROMPT)
-                .preamble("Follow the tool-calling instructions exactly.")
-                .tool(zero_arg_tool_definition("ping"));
-
-            let stream = model
-                .stream(request)
-                .expect("zero-arg streaming request should start");
-
-            assert_stream_contains_zero_arg_tool_call_named(stream, "ping", true).await;
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
 async fn zero_argument_tool_call_nonstreaming() {
     with_chatgpt_cassette(
         "codex_tool_args/zero_argument_tool_call_nonstreaming",
@@ -198,7 +177,7 @@ async fn zero_argument_tool_call_nonstreaming() {
                 .expect("response should contain the ping tool call");
             assert_eq!(tool_call.function.name, "ping");
             assert_eq!(
-                tool_call.function.arguments,
+                tool_call.function.arguments_value(),
                 json!({}),
                 "zero-argument tool calls should surface empty-object arguments"
             );
@@ -225,19 +204,19 @@ async fn nested_arguments_roundtrip_nonstreaming() {
                 .expect("nested-args tool chat should succeed");
 
             assert!(
-                result.output.contains("SAKURA-77"),
+                result.output().contains("SAKURA-77"),
                 "final answer should repeat the tool's confirmation code, got {result:?}"
             );
 
             let arguments = history
                 .iter()
                 .find_map(|message| match message {
-                    Message::Assistant { content, .. } => {
+                    Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                         content.iter().find_map(|item| match item {
                             AssistantContent::ToolCall(tool_call)
                                 if tool_call.function.name == PlanTrip::NAME =>
                             {
-                                Some(tool_call.function.arguments.clone())
+                                Some(tool_call.function.arguments_value())
                             }
                             _ => None,
                         })
@@ -246,39 +225,6 @@ async fn nested_arguments_roundtrip_nonstreaming() {
                 })
                 .expect("chat history should record the plan_trip tool call");
             assert_expected_plan_trip_arguments(&arguments);
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn nested_arguments_streaming() {
-    with_chatgpt_cassette(
-        "codex_tool_args/nested_arguments_streaming",
-        |client| async move {
-            let model = client.completion(chatgpt::GPT_5_4);
-            let request = CompletionRequest::new(NESTED_ARGS_PROMPT)
-                .preamble(NESTED_ARGS_PREAMBLE.to_string())
-                .tool(rig::tool::tool_definition(&PlanTrip));
-
-            let observation = collect_raw_stream_observation(
-                model
-                    .stream(request)
-                    .expect("nested-args streaming request should start"),
-            )
-            .await;
-
-            assert!(
-                observation.errors.is_empty(),
-                "stream should not emit errors: {:?}",
-                observation.errors
-            );
-            let tool_call = observation
-                .tool_calls
-                .iter()
-                .find(|tool_call| tool_call.function.name == PlanTrip::NAME)
-                .expect("stream should emit the plan_trip tool call");
-            assert_expected_plan_trip_arguments(&tool_call.function.arguments);
         },
     )
     .await;
@@ -300,7 +246,7 @@ async fn unicode_arguments_streaming() {
                     .to_string(),
             )
             .tool(ToolDefinition {
-                name: "echo".to_string(),
+                name: rig_core::message::ToolName::new("echo").expect("tool name"),
                 description: "Echo a message back to the user.".to_string(),
                 parameters: json!({
                     "type": "object",

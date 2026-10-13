@@ -22,8 +22,11 @@ pub use crate::observe::{
     AdapterErrorEnvelope, AdapterEvent, AdapterUsage, AdapterVerdict, ObservationSink,
 };
 
+mod citation;
+pub mod document;
 pub(crate) mod secret;
 
+pub use citation::{SpanUnit, WireCitation, WireSpan};
 pub use secret::Secret;
 
 /// The request a wire sends, and how its reply is framed.
@@ -192,11 +195,25 @@ pub trait Operation: Sized + 'static {
     /// [`Call::instrument`].
     fn fold(request: &Self::Request, call: &mut Call<'_>) -> Self::Fold;
 
-    /// Reject a request no provider of this operation can answer. The
-    /// driver calls it before the request is encoded, so a rejected request
-    /// reaches no wire or transport. Accepts every request by default.
-    fn validate(_request: &Self::Request) -> Result<(), ProviderError> {
-        Ok(())
+    /// Shape `request` for the wire `wire` describes, or reject a request
+    /// no provider of this operation can answer. The driver calls it before
+    /// the request is encoded, so a rejected request reaches no wire or
+    /// transport. Passes every request through by default.
+    fn prepare(
+        request: Self::Request,
+        wire: &Descriptor<'_>,
+    ) -> Result<Self::Request, ProviderError> {
+        let _ = wire;
+        Ok(request)
+    }
+
+    /// The normalized usage one reply's `end` carries. The driver hands it
+    /// to the attempt's one closing call when the reply ends, so the
+    /// observation is the usage the decoder already normalized and never a
+    /// second parse of the payload. Observes nothing by default.
+    fn observed_usage(end: &Self::End) -> Option<&crate::completion::Usage> {
+        let _ = end;
+        None
     }
 }
 
@@ -265,8 +282,8 @@ pub struct Reply {
     /// The provider descriptor name, for the response's `provider` field.
     pub provider: String,
     /// The reply's provider document (a completion's `raw`): the whole body
-    /// when it is one JSON document, else what the decoder recorded, else
-    /// `Null`.
+    /// when it is one JSON document, else what the wire's reassembler
+    /// rebuilt or a free-event decoder recorded, else `Null`.
     pub raw: serde_json::Value,
     /// The provider's transport request id from the reply headers.
     pub provider_request_id: Option<String>,
@@ -292,7 +309,7 @@ pub(crate) use reply::Shared;
 pub(crate) mod reply {
     use std::collections::VecDeque;
 
-    use super::{Operation, ProviderError};
+    use super::{Fold, Operation, ProviderError, Reply};
     use crate::streaming::Item;
 
     /// One reply's items and end, shared by the driver that writes them and
@@ -323,6 +340,46 @@ pub(crate) mod reply {
                 document: None,
                 route: String::new(),
             }
+        }
+
+        /// Take the next item: an event is absorbed by the fold before it
+        /// leaves, and an error is stamped with the reply's request id.
+        pub(crate) fn take(&mut self) -> Option<Result<Item<Op::Event>, ProviderError>> {
+            Some(match self.items.pop_front()? {
+                Ok(Item::Event(event)) => self.fold.absorb(&event).map(|()| Item::Event(event)),
+                Ok(unknown) => Ok(unknown),
+                // An id an upstream constructor already attached wins: it
+                // saw the reply.
+                Err(error) => Err(error.with_provider_request_id(self.request_id.clone())),
+            })
+        }
+
+        /// What the driver learned about the reply so far, from `provider`.
+        pub(crate) fn reply(&self, provider: &str) -> Reply {
+            Reply {
+                provider: provider.to_owned(),
+                // A whole body is the reply's document; a stream's is what
+                // the wire's reassembler rebuilt, or what the decoder of an
+                // operation with free events recorded.
+                raw: self
+                    .document
+                    .clone()
+                    .or_else(|| self.raw.clone())
+                    .unwrap_or(serde_json::Value::Null),
+                provider_request_id: self.request_id.clone(),
+            }
+        }
+
+        /// Fold the absorbed reply with the provider's end into the
+        /// response, or return the response a relay's origin folded. A
+        /// reply the provider did not end is [`ProviderError::Truncated`].
+        pub(crate) fn conclude(self, provider: &str) -> Result<Op::Response, ProviderError> {
+            if let Some(response) = self.response {
+                return Ok(response);
+            }
+            let reply = self.reply(provider);
+            let end = self.end.ok_or(ProviderError::Truncated)?;
+            self.fold.finish(end, reply)
         }
     }
 
@@ -404,6 +461,9 @@ impl Capabilities {
 /// What a wire says about itself: plain data, read before every call.
 #[derive(Debug, Clone)]
 pub struct Descriptor<'a> {
+    /// The model replay shapes a completion history for. Every completion
+    /// wire names one; other operations leave it `None`.
+    pub replay: Option<&'a dyn crate::completion::ReplayTarget>,
     /// The provider descriptor name (`"anthropic"`), as records and
     /// telemetry name it.
     pub name: &'a str,
@@ -413,19 +473,45 @@ pub struct Descriptor<'a> {
     /// What a runtime accounts for.
     pub capabilities: Capabilities,
     /// The telemetry operation for a call in each mode, when the endpoint
-    /// has a canonical name of its own (Gemini `generate_content`).
+    /// has a canonical name of its own (Gemini `generate_content`). The mode
+    /// itself is recorded separately, as `gen_ai.request.stream`.
     pub telemetry: Option<fn(Mode) -> crate::telemetry::GenAiOperation>,
+    /// The model facts a completion wire encodes with, which its replies are
+    /// priced by. `None` answers from the built-in catalog.
+    pub facts: Option<&'a crate::catalog::ModelFacts>,
 }
 
 impl<'a> Descriptor<'a> {
     /// A wire named `name`, addressing no model, with default capabilities.
     pub fn new(name: &'a str) -> Self {
         Self {
+            replay: None,
             name,
             model: None,
             capabilities: Capabilities::default(),
             telemetry: None,
+            facts: None,
         }
+    }
+
+    /// The spec of the model the wire addresses, from its facts under its
+    /// own name: the spec it was connected to, else the catalog's entry.
+    /// `None` for a wire that addresses no model, or a model the catalog
+    /// does not list.
+    pub fn spec(&self) -> Option<&'a crate::catalog::ModelSpec> {
+        let model = self.model?;
+        match self.facts {
+            Some(facts) => facts.for_model(self.name, model),
+            None => crate::catalog::Catalog::builtin()
+                .get_vendor(self.name, model)
+                .map(|resolved| resolved.spec),
+        }
+    }
+
+    /// The model replay shapes a completion history for.
+    pub fn replay(mut self, target: &'a dyn crate::completion::ReplayTarget) -> Self {
+        self.replay = Some(target);
+        self
     }
 
     /// The model id the wire addresses, when it addresses one.
@@ -437,6 +523,12 @@ impl<'a> Descriptor<'a> {
     /// What a runtime accounts for.
     pub fn capabilities(mut self, capabilities: Capabilities) -> Self {
         self.capabilities = capabilities;
+        self
+    }
+
+    /// The model facts the wire encodes with.
+    pub fn facts(mut self, facts: &'a crate::catalog::ModelFacts) -> Self {
+        self.facts = Some(facts);
         self
     }
 
@@ -496,30 +588,18 @@ impl<T> WireEvent<T> {
     }
 }
 
-/// Where a decoder writes one reply. The `'id` brand ties it, and every
-/// part handle it hands out, to that one reply: a handle cannot be used
-/// with another reply's writer or kept past its own.
+/// Where a decoder writes one reply. The `'id` brand ties it to that one
+/// reply: a writer cannot be kept past the decode step that received it.
 ///
 /// ```compile_fail
 /// use rig_core::operation::Completion;
 /// use rig_core::wire::Out;
 ///
-/// // A text part opened on one reply cannot grow on another.
-/// fn cross<'a, 'b>(a: &mut Out<'a, Completion>, b: &mut Out<'b, Completion>) {
-///     let part = a.text();
-///     b.push_text(&part, "x");
-/// }
-/// ```
+/// // A writer cannot be stashed to write into the reply later.
+/// struct Stash(Option<Out<'static, Completion>>);
 ///
-/// ```compile_fail
-/// use rig_core::operation::{Completion, TextPart};
-/// use rig_core::wire::Out;
-///
-/// // A handle cannot outlive its reply to be used on a later one.
-/// struct Stash(Option<TextPart<'static>>);
-///
-/// fn keep<'id>(stash: &mut Stash, out: &mut Out<'id, Completion>) {
-///     stash.0 = Some(out.text());
+/// fn keep<'id>(stash: &mut Stash, out: Out<'id, Completion>) {
+///     stash.0 = Some(out);
 /// }
 /// ```
 pub struct Out<'id, Op: Operation> {
@@ -550,14 +630,6 @@ impl<'id, Op: Operation> Out<'id, Op> {
         Flow::Ended(Ended(()))
     }
 
-    /// Record the reply's provider document, the response's `raw`, for any
-    /// operation. A whole JSON body the transport reported outranks it, and
-    /// a `raw` the decoder writes onto its response is replaced: a decoder
-    /// whose reply is not one JSON document records it here.
-    pub fn raw(&mut self, raw: serde_json::Value) {
-        self.lock().raw = Some(raw);
-    }
-
     /// A payload the provider sent that this decoder does not model. It
     /// reaches the consumer as [`Item::Unknown`](crate::streaming::Item).
     pub fn unknown(&mut self, payload: crate::streaming::UnknownPayload) {
@@ -568,6 +640,27 @@ impl<'id, Op: Operation> Out<'id, Op> {
 }
 
 impl<Op: Operation<Emit = Free>> Out<'_, Op> {
+    /// Record the reply's provider document, the response's `raw`. A whole
+    /// JSON body the transport reported outranks it: a decoder whose reply
+    /// is not one JSON document records it here.
+    ///
+    /// Only an operation whose decoders build their own events has this. A
+    /// completion's `raw` is what its wire's
+    /// [`Reassembler`](Wire::Reassembler) rebuilds, never what a decoder
+    /// writes:
+    ///
+    /// ```compile_fail,E0599
+    /// use rig_core::operation::Completion;
+    /// use rig_core::wire::Out;
+    ///
+    /// fn record(out: &mut Out<'_, Completion>) {
+    ///     out.raw(serde_json::json!({ "response_id": "x" }));
+    /// }
+    /// ```
+    pub fn raw(&mut self, raw: serde_json::Value) {
+        self.lock().raw = Some(raw);
+    }
+
     /// One event of the reply.
     ///
     /// Only an operation whose decoders build their own events has this; a
@@ -647,6 +740,13 @@ pub trait Wire: Clone + WasmCompatSend + WasmCompatSync + 'static {
     type Frame: WasmCompatSend + 'static;
     /// The decoder for one of its replies, branded with that reply.
     type Decoder<'id>: Decoder<'id, Self::Op, Self::Frame> + WasmCompatSend;
+    /// What rebuilds a reply's provider document from its frames when the
+    /// transport reports no whole document, as for a stream. The driver
+    /// feeds it every frame and records what it finishes with as `raw`.
+    /// A wire whose operation's decoders record `raw` themselves names
+    /// [`document::Unreassembled`]; a completion wire cannot, because it
+    /// does not [`Serve`](document::Serves) completions.
+    type Reassembler: document::Reassemble<Self::Frame> + document::Serves<Self::Op>;
 
     /// What the wire says about itself.
     fn describe(&self) -> Descriptor<'_>;
@@ -658,6 +758,12 @@ pub trait Wire: Clone + WasmCompatSend + WasmCompatSync + 'static {
 
     /// A fresh decoder for one reply.
     fn decoder<'id>(&self) -> Self::Decoder<'id>;
+
+    /// A fresh reassembler for one reply. A wire that picks its API per
+    /// reply builds the matching one.
+    fn reassembler(&self) -> Self::Reassembler {
+        Self::Reassembler::default()
+    }
 }
 
 /// The decoder of a reply that is one JSON document: the document is the
@@ -667,7 +773,7 @@ pub struct Json;
 
 impl<'id, Op> Decoder<'id, Op, WireFrame> for Json
 where
-    Op: Operation,
+    Op: Operation<Emit = Free>,
     Op::End: serde::de::DeserializeOwned,
 {
     type Event = (Op::End, serde_json::Value);

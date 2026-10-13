@@ -10,12 +10,6 @@ use std::panic::{AssertUnwindSafe, resume_unwind};
 
 use crate::cassettes::{CassetteSpec, ProviderCassette};
 
-pub(super) struct AnthropicFilesCassette {
-    pub(super) bound: AnthropicModels,
-    pub(super) base_url: String,
-    pub(super) api_key: String,
-}
-
 async fn anthropic_cassette(spec: impl Into<CassetteSpec>) -> (ProviderCassette, AnthropicConfig) {
     let cassette = ProviderCassette::start(
         &crate::cassettes::cassette_root(),
@@ -69,12 +63,34 @@ where
     let (cassette, bound) = anthropic_cassette(spec).await;
     let result = AssertUnwindSafe(test_body(AnthropicModels::new(
         bound,
-        rig::rig_reqwest::shared(),
+        rig_test_support::cassettes::local_http(),
     )))
     .catch_unwind()
     .await;
     crate::cassettes::checkpoint_attempt(&cassette, "anthropic", spec.scenario()).await;
     cassette.finish_after_test(result).await;
+}
+
+/// [`with_anthropic_cassette`], with `check` run on what the session
+/// recorded before the recording is written (`cassettes::finish_checked`).
+pub(super) async fn with_anthropic_checked_cassette<F, Fut>(
+    spec: impl Into<CassetteSpec>,
+    test_body: F,
+    check: impl FnOnce(&std::path::Path, &str),
+) where
+    F: FnOnce(AnthropicModels) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let spec = spec.into();
+    let (cassette, bound) = anthropic_cassette(spec).await;
+    let result = AssertUnwindSafe(test_body(AnthropicModels::new(
+        bound,
+        rig_test_support::cassettes::local_http(),
+    )))
+    .catch_unwind()
+    .await;
+    crate::cassettes::checkpoint_attempt(&cassette, "anthropic", spec.scenario()).await;
+    crate::cassettes::finish_checked(cassette, "anthropic", spec.scenario(), result, check).await;
 }
 
 /// Long-run caching recordings
@@ -92,7 +108,7 @@ where
 {
     let spec = spec.into();
     let (cassette, bound) = anthropic_cassette(spec).await;
-    let models = AnthropicModels::new(bound, rig::rig_reqwest::shared());
+    let models = AnthropicModels::new(bound, rig_test_support::cassettes::local_http());
     let result = AssertUnwindSafe(test_body(models, cassette.clock()))
         .catch_unwind()
         .await;
@@ -107,18 +123,6 @@ where
             unreachable!("finishing a failed session resumes its panic")
         }
     }
-}
-
-/// Per-bug wrapper for the model-turn termination-metadata matrix
-/// (`crates/rig-cassette/fixtures/cassettes/anthropic/turn_termination_matrix/`), rig#2184.
-pub(super) async fn with_anthropic_turn_metadata_cassette<F, Fut>(
-    spec: impl Into<CassetteSpec>,
-    test_body: F,
-) where
-    F: FnOnce(AnthropicModels) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    with_anthropic_cassette(spec, test_body).await;
 }
 
 /// Drive rig's Anthropic client against an Anthropic-*compatible* gateway
@@ -155,7 +159,7 @@ pub(super) async fn with_anthropic_gateway_cassette<F, Fut>(
 
     let result = AssertUnwindSafe(test_body(AnthropicModels::new(
         bound,
-        rig::rig_reqwest::shared(),
+        rig_test_support::cassettes::local_http(),
     )))
     .catch_unwind()
     .await;
@@ -165,54 +169,6 @@ pub(super) async fn with_anthropic_gateway_cassette<F, Fut>(
 /// OpenRouter's Anthropic Messages endpoint, minus the `/v1/messages` suffix
 /// the Anthropic client appends itself.
 const OPENROUTER_MESSAGES_BASE_URL: &str = "https://openrouter.ai/api";
-
-pub(super) async fn with_anthropic_cassette_result<F, Fut, E>(
-    spec: impl Into<CassetteSpec>,
-    test_body: F,
-) -> Result<(), E>
-where
-    F: FnOnce(AnthropicModels) -> Fut,
-    Fut: Future<Output = Result<(), E>>,
-{
-    let (cassette, bound) = anthropic_cassette(spec).await;
-    let result = AssertUnwindSafe(test_body(AnthropicModels::new(
-        bound,
-        rig::rig_reqwest::shared(),
-    )))
-    .catch_unwind()
-    .await;
-    cassette.finish_after_test_result(result).await
-}
-
-pub(super) async fn with_anthropic_files_cassette<F, Fut>(
-    spec: impl Into<CassetteSpec>,
-    beta_header: &'static str,
-    test_body: F,
-) where
-    F: FnOnce(AnthropicFilesCassette) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let cassette = ProviderCassette::start(
-        &crate::cassettes::cassette_root(),
-        "anthropic",
-        spec,
-        "https://api.anthropic.com",
-    )
-    .await;
-    let base_url = normalize_anthropic_base_url(&cassette.base_url());
-    let api_key = cassette.api_key("ANTHROPIC_API_KEY");
-    let bound = AnthropicConfig::new(api_key.as_str())
-        .with_base_url(&base_url)
-        .with_beta(beta_header);
-
-    let parts = AnthropicFilesCassette {
-        bound: AnthropicModels::new(bound, rig::rig_reqwest::shared()),
-        base_url,
-        api_key,
-    };
-    let result = AssertUnwindSafe(test_body(parts)).catch_unwind().await;
-    cassette.finish_after_test(result).await;
-}
 
 /// One model's recorded session
 /// (`crates/rig-cassette/fixtures/cassettes/anthropic/models/<model>/`).
@@ -243,7 +199,7 @@ where
     let base_url = normalize_anthropic_base_url(&cassette.base_url());
     let api_key = cassette.api_key("ANTHROPIC_API_KEY");
     let config = AnthropicConfig::new(api_key.as_str()).with_base_url(&base_url);
-    let models = AnthropicModels::new(config.clone(), rig::rig_reqwest::shared());
+    let models = AnthropicModels::new(config.clone(), rig_test_support::cassettes::local_http());
     let clock = cassette.clock();
     let result = AssertUnwindSafe(async {
         let uploaded = if upload_pdf {
@@ -255,7 +211,7 @@ where
             (
                 AnthropicModels::new(
                     config.clone().with_beta(ANTHROPIC_FILES_BETA),
-                    rig::rig_reqwest::shared(),
+                    rig_test_support::cassettes::local_http(),
                 ),
                 file_id,
             )
@@ -403,26 +359,11 @@ pub(super) async fn with_anthropic_cassette_bogus_key<F, Fut>(
         AnthropicConfig::new("sk-invalid-edge-matrix-key").with_base_url(cassette.base_url());
     let result = AssertUnwindSafe(test_body(AnthropicModels::new(
         bound,
-        rig::rig_reqwest::shared(),
+        rig_test_support::cassettes::local_http(),
     )))
     .catch_unwind()
     .await;
     cassette.finish_after_test(result).await;
-}
-
-/// Cassette wrapper for the extended-thinking usage matrix.
-///
-/// Delegates to [`with_anthropic_cassette`], separate for the same per-bug
-/// registry reason as [`with_anthropic_stop_sequence_cassette`] (see
-/// `crates/rig-cassette/fixtures/cassettes/anthropic/reasoning_usage_matrix/`).
-pub(super) async fn with_anthropic_reasoning_usage_cassette<F, Fut>(
-    spec: impl Into<CassetteSpec>,
-    test_body: F,
-) where
-    F: FnOnce(AnthropicModels) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    with_anthropic_cassette(spec, test_body).await;
 }
 
 /// The effect corpus's request-shape matrix (Matrix E), one wrapper per
@@ -609,24 +550,6 @@ pub(super) fn recorded_request_id_headers(scenario: &str) -> Vec<Option<String>>
     ids
 }
 
-/// JSON `data:` frames of one recorded SSE body, excluding `[DONE]`.
-///
-/// `crate::cassettes::recorded_sse_json_frames` reads only a scenario's first
-/// interaction; multi-interaction streamed cells (agent tool runs) need the
-/// frames of *each* interaction, which they get by pairing this with
-/// `crate::cassettes::recorded_interaction_bodies`.
-pub(super) fn sse_json_frames(body: &str) -> Vec<serde_json::Value> {
-    body.lines()
-        .filter_map(|line| line.trim().strip_prefix("data:"))
-        .map(str::trim)
-        .filter(|payload| *payload != "[DONE]")
-        .map(|payload| {
-            serde_json::from_str(payload)
-                .unwrap_or_else(|err| panic!("recorded SSE frame should be JSON: {err}"))
-        })
-        .collect()
-}
-
 /// Assert that a sequence of ids the code under test observed is the sequence
 /// the fixture recorded — in both cassette modes.
 ///
@@ -772,4 +695,17 @@ pub(super) async fn delete_uploaded_file(base_url: &str, api_key: &str, file_id:
             response.status()
         );
     }
+}
+
+/// A response serialized without its `raw` document or its blocks'
+/// provider items: what rig normalized, in rig's own spelling.
+pub(super) fn canonical_without_raw(
+    mut response: rig::completion::CompletionResponse,
+) -> serde_json::Value {
+    response.choice = response
+        .choice
+        .iter()
+        .map(rig::message::AssistantContent::canonical)
+        .collect();
+    crate::support::normalized_without_raw(response)
 }

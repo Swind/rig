@@ -505,7 +505,7 @@ fn describe_required(
             let advertised = advertised_tool(name, log)
                 .ok_or_else(|| gap("no recorded request advertises the tool"))?;
             Ok(FamilyDescriptor::Tool {
-                name: advertised.name,
+                name: advertised.name.into(),
                 description: advertised.description,
                 parameters: advertised.parameters,
                 embedding: None,
@@ -544,7 +544,7 @@ fn describe(key: &HandlerKey, kind: &EffectKind, log: &EffectLog) -> FamilyDescr
         },
         EffectKind::ToolCall { name, .. } => match advertised_tool(name, log) {
             Some(tool) => FamilyDescriptor::Tool {
-                name: tool.name,
+                name: tool.name.into(),
                 description: tool.description,
                 parameters: tool.parameters,
                 embedding: None,
@@ -665,7 +665,10 @@ impl Serve for EffectLogReplayer {
                                 };
                                 let items = events.into_items();
                                 let events = items.len();
-                                let mut replayed = Vec::with_capacity(events + errors.len() + 1);
+                                let mut replayed = Vec::with_capacity(events + errors.len() + 2);
+                                replayed.extend(record.stream_origin.map(|origin| {
+                                    Ok(rig_core::streaming::Relayed::Origin(origin))
+                                }));
                                 let mut errors = errors.into_iter().peekable();
                                 let mut items = items.into_iter();
                                 for position in 0..events + errors.len() {

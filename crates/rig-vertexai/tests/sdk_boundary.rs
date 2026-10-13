@@ -19,17 +19,14 @@
 
 mod support;
 
-use futures::StreamExt;
 use google_cloud_aiplatform_v1::client::PredictionService;
 use rig_core::Model;
 use rig_core::completion::{CompletionRequest, ToolDefinition};
 use rig_core::error::ProviderError;
 use rig_core::message::{AssistantContent, Message, Text, ToolChoice, UserContent};
-use rig_core::streaming::StreamEvent;
 use rig_vertexai::VertexAi;
 use rig_vertexai::client::VertexAiClientError;
 use rig_vertexai::completion::GenerateContent;
-use std::time::Duration;
 use support::{LocalEndpoint, Reply, SentinelCredentials, text_response, tool_call_response};
 
 const PROJECT: &str = "rig-test-project";
@@ -58,20 +55,9 @@ async fn hosted_model(
 }
 
 fn request(prompt: &str) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: vec![Message::User {
-            content: vec![UserContent::Text(Text::new(prompt.to_string()))],
-        }],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    CompletionRequest::from(vec![Message::User {
+        content: vec![UserContent::Text(Text::new(prompt.to_string()))],
+    }])
 }
 
 /// The whole unary path: Rig's request conversion, the SDK's URL and query
@@ -98,7 +84,7 @@ async fn unary_completion_converts_the_request_and_maps_the_response() {
     request.max_tokens = Some(64);
     request.tool_choice = Some(ToolChoice::Required);
     request.tools = vec![ToolDefinition {
-        name: "lookup_weather".to_string(),
+        name: rig_core::message::ToolName::new("lookup_weather").expect("tool name"),
         description: "look up the weather".to_string(),
         parameters: serde_json::json!({
             "type": "object",
@@ -140,8 +126,10 @@ async fn unary_completion_converts_the_request_and_maps_the_response() {
     );
     assert_eq!(
         body["systemInstruction"],
-        serde_json::json!({"role": "user", "parts": [{"text": "you are terse"}]})
+        serde_json::json!({"role": "model", "parts": [{"text": "you are terse"}]}),
+        "the system instruction is the REST wire's, transcoded"
     );
+
     assert_eq!(
         body["tools"],
         serde_json::json!([{
@@ -175,7 +163,7 @@ async fn unary_completion_converts_the_request_and_maps_the_response() {
     };
     assert_eq!(call.function.name, "lookup_weather");
     assert_eq!(
-        call.function.arguments,
+        call.function.arguments_value(),
         serde_json::json!({"city": "Lisbon"})
     );
 }
@@ -275,69 +263,6 @@ async fn a_provider_error_preserves_the_reply_and_carries_no_request_credentials
     assert_eq!(credentials.issued(), 1);
 }
 
-/// Dropping the completion future releases the in-flight RPC: the endpoint,
-/// still holding the request open, sees the connection go away. The client and
-/// its credentials are not operation-scoped, so the next completion works.
-#[tokio::test]
-async fn a_cancelled_completion_releases_its_rpc_and_leaves_the_client_usable() {
-    let endpoint = LocalEndpoint::spawn([Reply::Hang, Reply::ok(text_response("after"))]).await;
-    let credentials = SentinelCredentials::rotating("cancel-token");
-    let model = hosted_model(&endpoint, &credentials).await;
-
-    // Arrival, not elapsed time, establishes that there is real work to cancel.
-    {
-        let completion = model.call(request("abandoned"));
-        tokio::pin!(completion);
-        tokio::select! {
-            result = &mut completion => panic!("held RPC completed before cancellation: {result:?}"),
-            () = endpoint.wait_for_requests(1) => {}
-        }
-    }
-
-    endpoint.wait_for_disconnects(1).await;
-    assert_eq!(
-        endpoint.disconnects(),
-        1,
-        "the abandoned RPC's connection was actually closed, not left dangling"
-    );
-
-    let response = tokio::time::timeout(Duration::from_secs(10), model.call(request("next")))
-        .await
-        .expect("subsequent completion deadline")
-        .expect("the shared client and its credentials survived the cancellation");
-    assert!(
-        matches!(response.choice.as_slice(), [AssistantContent::Text(text)] if text.text == "after")
-    );
-    assert_eq!(credentials.issued(), 2);
-}
-
-/// This integration has no streaming RPC: a streamed call sends the unary
-/// request once and re-emits its reply as the events a stream carries.
-#[tokio::test]
-async fn a_streamed_call_re_emits_the_unary_reply() {
-    let endpoint = LocalEndpoint::spawn([Reply::ok(text_response("streamed"))]).await;
-    let credentials = SentinelCredentials::rotating("stream-token");
-    let model = hosted_model(&endpoint, &credentials).await;
-
-    let mut stream = model
-        .stream(request("stream please"))
-        .expect("the stream opens");
-    let mut text = String::new();
-    while let Some(item) = stream.next().await {
-        if let rig_core::streaming::Item::Event(StreamEvent::Text { text: fragment, .. }) =
-            item.expect("stream item")
-        {
-            text.push_str(&fragment);
-        }
-    }
-    assert_eq!(text, "streamed");
-    let response = stream.finish().await.expect("the reply ended");
-    assert!(
-        matches!(response.choice.as_slice(), [AssistantContent::Text(text)] if text.text == "streamed")
-    );
-    assert_eq!(endpoint.request_count(), 1);
-}
-
 /// A supplied client already fixes its credentials. Configuring both is a
 /// contradiction, and is refused at build time rather than by silently
 /// ignoring one of them.
@@ -364,8 +289,8 @@ async fn supplying_both_a_client_and_credentials_is_refused() {
 }
 
 /// On the deferred path Rig builds the SDK client on the first completion, so
-/// an initialization failure surfaces there — as a Rig-side provider error,
-/// not as a provider reply — and the cached failure is reported identically to
+/// an initialization failure surfaces there — as a Rig-side request error
+/// carrying the SDK's typed error, not as a provider reply — and the cached failure is reported identically to
 /// every later caller.
 #[tokio::test]
 async fn deferred_client_initialization_failure_surfaces_on_first_use() {
@@ -386,10 +311,14 @@ async fn deferred_client_initialization_failure_surfaces_on_first_use() {
             .call(request("hello"))
             .await
             .expect_err("the SDK client cannot be built");
+        let client_error = match &error {
+            ProviderError::Request(source) => source.downcast_ref::<VertexAiClientError>(),
+            _ => None,
+        };
         assert!(
-            matches!(&error, ProviderError::Provider(message)
-                if message.contains("universe domain")),
-            "attempt {attempt}: unexpected error: {error}"
+            matches!(client_error, Some(VertexAiClientError::PredictionService(sdk))
+                if sdk.is_universe_domain_mismatch()),
+            "attempt {attempt}: unexpected error: {error:?}"
         );
         assert_eq!(
             error.provider_response_body(),

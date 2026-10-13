@@ -22,6 +22,9 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use rig::completion::Effort;
+
+use super::super::support::stateless;
 use crate::cassettes::{self, ProviderCassette};
 use crate::reasoning::{self, WeatherTool};
 
@@ -38,9 +41,8 @@ async fn nonstreaming_reasoning_content_tool_roundtrip() {
             let agent = rig::AgentBuilder::new(client.completion("llama-cpp-reasoning-model"))
                 .preamble(reasoning::TOOL_SYSTEM_PROMPT)
                 .tool(WeatherTool::new(call_count.clone()))
-                .additional_params(json!({
-                    "reasoning": { "effort": "medium" }
-                }))
+                .reasoning(Effort::Medium)
+                .provider_options(stateless())
                 .default_max_turns(2)
                 .build();
 
@@ -48,7 +50,7 @@ async fn nonstreaming_reasoning_content_tool_roundtrip() {
                 .chat(reasoning::TOOL_USER_PROMPT, &mut Vec::<Message>::new())
                 .await
                 .expect("OpenAI-compatible provider should accept replayed reasoning content")
-                .output;
+                .output();
 
             reasoning::assert_nonstreaming_universal(&result, &call_count, "openai-compatible");
         },
@@ -76,7 +78,7 @@ where
 
     let result = AssertUnwindSafe(test_body(OpenAiModels::new(
         client,
-        rig::rig_reqwest::shared(),
+        rig_test_support::cassettes::local_http(),
     )))
     .catch_unwind()
     .await;

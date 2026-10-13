@@ -15,26 +15,6 @@ fn test_model_default_ndims_lookup() {
     assert_eq!(model_default_ndims("unknown-model"), None);
 }
 
-/// `ndims` is what every document in the batch asks for, so the wire has to
-/// resolve it from the model identifier when the caller named none — the
-/// batch body carries `output_dimensionality` unconditionally.
-#[test]
-fn ndims_defaults_from_the_model_identifier() {
-    let gemini = GeminiConfig::new("test_key");
-
-    assert_eq!(gemini.embedding(EMBEDDING_001, None).ndims, 3072);
-    assert_eq!(gemini.embedding(EMBEDDING_004, None).ndims, 768);
-    // A model this build has never heard of still gets a dimensionality.
-    assert_eq!(gemini.embedding("some-future-model", None).ndims, 768);
-}
-
-#[test]
-fn an_explicit_ndims_outranks_the_models_default() {
-    let gemini = GeminiConfig::new("test_key");
-
-    assert_eq!(gemini.embedding(EMBEDDING_001, Some(256)).ndims, 256);
-}
-
 /// `crates/rig-cassette/fixtures/cassettes/gemini/embeddings/derive_document_embeddings.yaml`'s
 /// request body, verbatim.
 const RECORDED_BATCH: &str = r#"{"requests":[{"content":{"parts":[{"text":"Hello, world!"}]},"model":"models/gemini-embedding-001","output_dimensionality":3072},{"content":{"parts":[{"text":"Goodbye, world!"}]},"model":"models/gemini-embedding-001","output_dimensionality":3072}]}"#;
@@ -71,15 +51,10 @@ fn the_batch_request_is_the_recorded_one() {
     );
     // The GenerateContent family authenticates by query parameter.
     assert_eq!(request.uri().query(), Some("key=test-key"));
-    let body = match request.body() {
-        Body::Bytes(bytes) => String::from_utf8_lossy(bytes).into_owned(),
-        Body::Multipart(_) => unreachable!("the embedding wire sends JSON"),
-    };
     // Compared as documents, not as strings: a workspace build that enables
     // `serde_json/preserve_order` serializes the object in insertion order
     // rather than sorted, and the recording is a document either way.
-    let sent: serde_json::Value =
-        serde_json::from_str(&body).expect("the encoded body is one JSON document");
+    let sent = crate::test_utils::json_body(request);
     let recorded: serde_json::Value =
         serde_json::from_str(RECORDED_BATCH).expect("the recording is one JSON document");
     assert_eq!(sent, recorded);

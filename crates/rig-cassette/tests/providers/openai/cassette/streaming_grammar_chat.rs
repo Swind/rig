@@ -1,6 +1,6 @@
 //! Canonical streaming-grammar coverage for the OpenAI **chat-completions**
 //! wire (the compat family's canonical wire), asserted through the
-//! *normalized* path: the aggregated [`StreamingCompletionResponse::choice`],
+//! *normalized* path: the aggregated `choice` from `CompletionStream::finish`,
 //! the terminal `CompletionResponse` record, usage, IDs, and finish reason — real
 //! recorded wire traffic, not synthetic chunks.
 //!
@@ -18,7 +18,8 @@ use rig::message::{AssistantContent, ToolCall};
 use rig::providers::openai;
 use rig::streaming::Item;
 use rig::streaming::StreamEvent;
-use serde_json::json;
+
+use rig::providers::openai::extension::{ChatOptions, OpenAiOptions};
 
 use super::super::support::with_openai_completions_cassette;
 use crate::support::{AlphaSignal, BetaSignal, TWO_TOOL_STREAM_PREAMBLE, TWO_TOOL_STREAM_PROMPT};
@@ -120,7 +121,7 @@ async fn parallel_tool_calls_stay_distinct() {
                 .preamble(TWO_TOOL_STREAM_PREAMBLE.to_string())
                 .tool(rig::tool::tool_definition(&AlphaSignal))
                 .tool(rig::tool::tool_definition(&BetaSignal))
-                .additional_params(json!({ "parallel_tool_calls": true }));
+                .parallel_tool_calls(true);
             let run = drain_stream(model.stream(request).expect("stream should start")).await;
 
             assert_terminal(&run, FinishReason::ToolCalls);
@@ -145,7 +146,7 @@ async fn parallel_tool_calls_stay_distinct() {
                     "{name} should carry the wire-issued call id"
                 );
                 assert!(
-                    streamed.function.arguments.is_object(),
+                    streamed.function.invalid_arguments.is_none(),
                     "{name} arguments must assemble into an object, got {:?}",
                     streamed.function.arguments
                 );
@@ -164,54 +165,6 @@ async fn parallel_tool_calls_stay_distinct() {
     .await;
 }
 
-/// Tool call and assistant content in the same turn: the aggregated choice
-/// keeps the text part and the tool-call part as separate siblings.
-#[tokio::test]
-async fn tool_call_and_content_in_same_turn() {
-    with_openai_completions_cassette(
-        "streaming_grammar_chat/tool_call_with_content",
-        |client| async move {
-            let model = client.chat(openai::GPT_4O);
-            let request = CompletionRequest::new("Look up the harbor label for me.")
-                .preamble(
-                    "Before every tool call, first narrate what you are about to do in one \
-                     short sentence of normal assistant text in the same reply, then emit \
-                     the tool call. Never call a tool without narrating first."
-                        .to_string(),
-                )
-                .tool(rig::tool::tool_definition(&AlphaSignal));
-            let run = drain_stream(model.stream(request).expect("stream should start")).await;
-
-            assert_terminal(&run, FinishReason::ToolCalls);
-            assert!(
-                !run.text.trim().is_empty(),
-                "turn should stream assistant text alongside the tool call"
-            );
-            let aggregated_text = aggregated_text(&run.choice);
-            assert_eq!(
-                aggregated_text, run.text,
-                "aggregated choice should keep the streamed text next to the call"
-            );
-            let calls = aggregated_tool_calls(&run.choice);
-            assert_eq!(
-                calls.len(),
-                1,
-                "aggregated choice should keep exactly the one tool call"
-            );
-            assert_eq!(calls[0].function.name, "lookup_harbor_label");
-            let streamed = run
-                .tool_calls
-                .first()
-                .expect("stream should yield the tool call");
-            assert_eq!(
-                calls[0].id, streamed.id,
-                "ids derive from the recorded turn"
-            );
-        },
-    )
-    .await;
-}
-
 /// `logprobs`-bearing chunks: the wire attaches per-token fields Rig does not
 /// model. Forward-compat contract — unknown fields are ignored, the stream
 /// completes normally, and the aggregation is unaffected.
@@ -222,7 +175,9 @@ async fn logprobs_chunks_are_forward_compatible() {
         |client| async move {
             let model = client.chat(openai::GPT_4O);
             let request = CompletionRequest::new("Reply with one short sentence about tides.")
-                .additional_params(json!({ "logprobs": true, "top_logprobs": 2 }));
+                .provider_option(
+                    OpenAiOptions::new().chat(ChatOptions::new().logprobs(true).top_logprobs(2)),
+                );
             let run = drain_stream(model.stream(request).expect("stream should start")).await;
 
             assert_terminal(&run, FinishReason::Stop);

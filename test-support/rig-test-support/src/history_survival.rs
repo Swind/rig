@@ -18,7 +18,6 @@
 //! let request = serde_json::json!({ "messages": [] });
 //! assert!(lost_tokens(Dialect::from_path("/v1/messages"), "{}", &request).is_empty());
 //! ```
-#![allow(dead_code)]
 
 pub mod adversarial;
 pub mod driver;
@@ -27,7 +26,77 @@ pub mod sessions;
 
 use std::collections::BTreeSet;
 
+use rig_agent::agent::AgentBuilder;
+use rig_core::completion::{CompletionRequest, GenerationOptions, ProviderOptions};
 use serde_json::Value;
+
+/// The typed options a cell's requests carry.
+#[derive(Clone, Debug, Default)]
+pub struct Options {
+    /// Portable generation options.
+    pub generation: GenerationOptions,
+    /// Typed provider options.
+    pub provider: ProviderOptions,
+}
+
+impl Options {
+    /// No option set.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// `generation` beside `provider`.
+    pub fn new(generation: GenerationOptions, provider: ProviderOptions) -> Self {
+        Self {
+            generation,
+            provider,
+        }
+    }
+
+    /// Set these options on every request of `builder`'s agent.
+    pub fn configure<T>(&self, builder: AgentBuilder<T>) -> AgentBuilder<T> {
+        builder
+            .options(self.generation.clone())
+            .provider_options(self.provider.clone())
+    }
+}
+
+/// What a request carries beyond its conversation: raw provider parameters
+/// and typed options.
+#[derive(Clone, Debug, Default)]
+pub struct Params {
+    /// Raw `additional_params`.
+    pub additional_params: Option<Value>,
+    /// Typed options.
+    pub options: Options,
+}
+
+impl Params {
+    /// Set these on `request`, replacing what it carried.
+    pub fn apply(&self, request: &mut CompletionRequest) {
+        request.additional_params = self.additional_params.clone();
+        request.options = self.options.generation.clone();
+        request.provider_options = self.options.provider.clone();
+    }
+}
+
+impl From<Option<Value>> for Params {
+    fn from(additional_params: Option<Value>) -> Self {
+        Self {
+            additional_params,
+            options: Options::none(),
+        }
+    }
+}
+
+impl From<Options> for Params {
+    fn from(options: Options) -> Self {
+        Self {
+            additional_params: None,
+            options,
+        }
+    }
+}
 
 /// The request/response grammar a recorded path speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,14 +111,11 @@ pub enum Dialect {
     /// OpenAI Responses and its dialects: `reasoning` items with
     /// `encrypted_content`, `function_call` items with `call_id`.
     OpenAiResponses,
-    /// Chat Completions and its dialects: `tool_calls[].id`.
+    /// Chat Completions and its dialects, and Ollama's `/api/chat`, whose
+    /// calls and results carry the same ids: `tool_calls[].id`.
     ChatCompletions,
-    /// Ollama `/api/chat`: `tool_calls[].id` when the daemon issues one.
-    OllamaChat,
     /// Bedrock Converse: `reasoningText.signature`, `toolUse.toolUseId`.
     BedrockConverse,
-    /// Cohere v2 chat: `tool_calls[].id`.
-    CohereChat,
     /// An endpoint this rule does not model.
     Unmodeled,
 }
@@ -65,14 +131,10 @@ impl Dialect {
             Self::GeminiInteractions
         } else if path.ends_with("/responses") {
             Self::OpenAiResponses
-        } else if path.ends_with("/chat/completions") {
+        } else if path.ends_with("/chat/completions") || path.ends_with("/api/chat") {
             Self::ChatCompletions
-        } else if path.ends_with("/api/chat") {
-            Self::OllamaChat
         } else if path.contains("/converse") {
             Self::BedrockConverse
-        } else if path.ends_with("/v2/chat") {
-            Self::CohereChat
         } else {
             Self::Unmodeled
         }
@@ -88,11 +150,9 @@ impl Dialect {
     /// The request field holding the conversation.
     pub fn conversation_field(self) -> Option<&'static str> {
         match self {
-            Self::AnthropicMessages
-            | Self::ChatCompletions
-            | Self::OllamaChat
-            | Self::BedrockConverse
-            | Self::CohereChat => Some("messages"),
+            Self::AnthropicMessages | Self::ChatCompletions | Self::BedrockConverse => {
+                Some("messages")
+            }
             Self::GeminiGenerateContent => Some("contents"),
             Self::GeminiInteractions | Self::OpenAiResponses => Some("input"),
             Self::Unmodeled => None,
@@ -232,7 +292,7 @@ fn collect_tokens(value: &Value, complete: bool, tokens: &mut Vec<Token>) {
                 Some("function_call") => push("tool_call_id", "call_id", call.clone()),
                 _ => {}
             }
-            // Chat Completions, Ollama and Cohere calls: an object holding a
+            // Chat Completions calls: an object holding a
             // `function` beside its `id`.
             if object.contains_key("function") {
                 push("tool_call_id", "id", call.clone());
@@ -271,7 +331,15 @@ fn call_anchor(object: &serde_json::Map<String, Value>, complete: bool) -> Optio
     }
     let arguments = ["arguments", "input", "args"]
         .iter()
-        .find_map(|key| function.get(*key))
+        .find_map(|key| function.get(*key));
+    // A call the output budget cut states what a tolerant parse reads, not
+    // the text it arrived as, so it is owned by its name alone.
+    if let Some(Value::String(text)) = arguments
+        && serde_json::from_str::<Value>(text).is_err()
+    {
+        return Some(name.to_owned());
+    }
+    let arguments = arguments
         .map(|arguments| match arguments {
             Value::String(text) => serde_json::from_str(text).unwrap_or(arguments.clone()),
             other => other.clone(),
@@ -499,7 +567,7 @@ fn collect_slots(parent_key: Option<&str>, value: &Value, slots: &mut Slots) {
                 }
                 _ => {}
             }
-            // Chat Completions, Ollama and Cohere: calls under `tool_calls`,
+            // Chat Completions: calls under `tool_calls`,
             // results as `role: tool` messages.
             if parent_key == Some("tool_calls") {
                 put("tool_call_id", Leg::Call, "id", call.clone());
@@ -585,8 +653,8 @@ impl std::fmt::Display for Unpaired {
 }
 
 /// Every tool call in a request must be answered before the conversation
-/// moves on, and every result must answer a call. Ollama and Gemini pair by
-/// name and order; the other dialects pair by id.
+/// moves on, and every result must answer a call. Gemini pairs by name and
+/// order; the other dialects pair by id.
 pub fn unpaired_tool_calls(dialect: Dialect, request: &Value) -> Vec<Unpaired> {
     let Some(field) = dialect.conversation_field() else {
         return Vec::new();
@@ -715,7 +783,7 @@ fn turn_calls_and_results(dialect: Dialect, turn: &Value) -> (Vec<String>, Vec<S
     let mut results = Vec::new();
     let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_owned);
     match dialect {
-        Dialect::ChatCompletions | Dialect::CohereChat => {
+        Dialect::ChatCompletions => {
             for call in turn
                 .get("tool_calls")
                 .and_then(Value::as_array)
@@ -726,19 +794,6 @@ fn turn_calls_and_results(dialect: Dialect, turn: &Value) -> (Vec<String>, Vec<S
             }
             if turn.get("role").and_then(Value::as_str) == Some("tool") {
                 results.extend(text(turn.get("tool_call_id")));
-            }
-        }
-        Dialect::OllamaChat => {
-            for call in turn
-                .get("tool_calls")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                calls.extend(text(call.pointer("/function/name")));
-            }
-            if turn.get("role").and_then(Value::as_str) == Some("tool") {
-                results.extend(text(turn.get("tool_name")));
             }
         }
         Dialect::AnthropicMessages => {

@@ -49,15 +49,13 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
-use rig::completion::CompletionRequest;
 use rig::completion::Usage;
+use rig::completion::{CompletionRequest, Reasoning};
 use rig::error::ErrorReport;
 use rig::error::ProviderError;
-use rig::message::{AssistantContent, Reasoning};
+use rig::message::AssistantContent;
 use rig::providers::gemini::Gemini;
-use rig::providers::gemini::completion::gemini_api_types::{
-    AdditionalParameters, GenerationConfig, ThinkingConfig,
-};
+use rig::providers::gemini::extension::GeminiOptions;
 use rig::streaming::{Item, Relayed, StreamEvent, StreamEvents};
 
 const MODEL: &str = "gemini-2.5-flash";
@@ -173,9 +171,7 @@ fn visible_len(item: &Relayed) -> usize {
         StreamEvent::End {
             content: AssistantContent::Reasoning(r),
             ..
-        } => r
-            .open(r.issuer())
-            .map_or(0, |r| r.display_text().chars().count()),
+        } => r.text.chars().count(),
         _ => 0,
     }
 }
@@ -235,6 +231,7 @@ where
                 reason = Some(format!("stream error: {err}"));
                 break;
             }
+            Ok(Some(Ok(Relayed::Origin(_)))) => {}
             Ok(Some(Ok(Relayed::Item(Item::Event(item))))) => match item {
                 StreamEvent::Text { text, .. } => output.push_str(&text),
                 StreamEvent::Reasoning { text, .. } => {
@@ -244,11 +241,7 @@ where
                     content: AssistantContent::Reasoning(r),
                     ..
                 } => {
-                    output.push_str(
-                        &r.open(r.issuer())
-                            .map(Reasoning::display_text)
-                            .unwrap_or_default(),
-                    );
+                    output.push_str(&r.text.clone());
                 }
                 _ => {}
             },
@@ -276,12 +269,10 @@ where
             let input_tokens = count_tokens(http, api_key, prompt_text).await?;
             let output_tokens = count_tokens(http, api_key, &output).await?;
 
-            let usage = Usage {
-                input_tokens: Some(input_tokens),
-                output_tokens: Some(output_tokens),
-                total_tokens: Some(input_tokens + output_tokens),
-                ..Default::default()
-            };
+            let usage = Usage::new()
+                .input_tokens(input_tokens)
+                .output_tokens(output_tokens)
+                .total_tokens(input_tokens + output_tokens);
 
             Outcome::Estimated {
                 usage,
@@ -327,19 +318,10 @@ async fn count_tokens(http: &reqwest::Client, api_key: &str, text: &str) -> anyh
 /// 2.5-flash spends seconds generating hidden thoughts (no chunks sent), which
 /// is indistinguishable from a stall and would trip the read timeout before any
 /// real partial output — masking the injected disruptions.
-fn no_thinking_params() -> anyhow::Result<serde_json::Value> {
-    let params = AdditionalParameters {
-        generation_config: Some(GenerationConfig {
-            thinking_config: Some(ThinkingConfig {
-                include_thoughts: Some(false),
-                thinking_budget: Some(0),
-                thinking_level: None,
-            }),
-            ..Default::default()
-        }),
-        additional_params: None,
-    };
-    Ok(serde_json::to_value(&params)?)
+fn no_thinking(request: CompletionRequest) -> CompletionRequest {
+    request
+        .reasoning(Reasoning::Off)
+        .provider_option(GeminiOptions::new().include_thoughts(false))
 }
 
 async fn run_scenario(
@@ -351,12 +333,11 @@ async fn run_scenario(
 ) -> anyhow::Result<Report> {
     let model = Gemini::from_env()?.completion(MODEL);
 
-    let stream = model.stream(
+    let stream = model.stream(no_thinking(
         CompletionRequest::new(prompt)
             .temperature(0.7)
-            .max_tokens(2000)
-            .additional_params(no_thinking_params()?),
-    )?;
+            .max_tokens(2000),
+    ))?;
 
     let disrupted = Disrupt::new(stream.into_relay(), mode, DISRUPT_AFTER_CHARS);
     drain_with_accounting(label, disrupted, http, api_key, prompt).await

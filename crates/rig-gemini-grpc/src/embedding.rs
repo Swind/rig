@@ -4,7 +4,7 @@
 //! use rig_core::Model;
 //! use rig_gemini_grpc::{GeminiGrpc, embedding::{EMBEDDING_004, Embeddings}};
 //!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+//! # async fn example() -> Result<(), rig_gemini_grpc::GeminiGrpcError> {
 //! let model = GeminiGrpc::new("API_KEY").await?.embedding(EMBEDDING_004, None);
 //! # let _ = model;
 //! # Ok(())
@@ -44,6 +44,7 @@ impl Wire for Embeddings {
     type Payload = Vec<(String, EmbedContentRequest)>;
     type Frame = (String, proto::EmbedContentResponse);
     type Decoder<'id> = EmbeddingsDecoder;
+    type Reassembler = rig_core::wire::document::Unreassembled;
 
     fn describe(&self) -> Descriptor<'_> {
         Descriptor::new(super::completion::PROVIDER_NAME)
@@ -62,7 +63,10 @@ impl Wire for Embeddings {
                 let request = EmbedContentRequest {
                     model: format!("models/{}", self.model),
                     content: Some(proto::Content {
-                        parts: vec![super::completion::text_part(text.clone())],
+                        parts: vec![proto::Part {
+                            data: Some(proto::part::Data::Text(text.clone())),
+                            ..proto::Part::default()
+                        }],
                         role: String::new(),
                     }),
                     task_type: None,
@@ -85,10 +89,7 @@ impl Transport<Embeddings> for GeminiGrpc {
         requests: Vec<(String, EmbedContentRequest)>,
         _exchange: Exchange,
     ) -> Opening<(String, proto::EmbedContentResponse)> {
-        let mut client = match self.grpc_client() {
-            Ok(client) => client,
-            Err(error) => return Opening::failed(ProviderError::Provider(error.to_string())),
-        };
+        let mut client = self.grpc_client();
         // Sequential calls, each completed inside the send so they run under
         // the attempt's span; the first RPC error ends the batch.
         Opening::new(async move {

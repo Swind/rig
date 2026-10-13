@@ -48,7 +48,7 @@ sources unchanged.
 
 The runtime accepts `rig_core::serve::Recorder`, not a concrete log type.
 Enable the separate `rig-cassette` crate's `agent` feature for logs and replay
-adapters; neither crate configuration adds ECS/Bevy or the native HTTP engine.
+adapters; neither crate configuration adds the native HTTP engine.
 
 Retain a `rig_cassette::effect_log::EffectLogRecorder` and attach a clone with
 `AgentBuilder::record_to`. Choose `keeping_stream_events()` when the recording
@@ -110,7 +110,7 @@ every *decision* the agent loop makes — turn budget, tool-call validation and
 recovery, history threading, structured-output policy, usage accounting, final
 response — and performs no IO. A *driver* calls `next_step()` and acts on the
 returned `AgentRunStep` (`CallModel`, `CallTools`, `Done`), feeding results
-back with `model_response` / `tool_results`. This crate's futures loop is the
+back with `model_response` / `answer`. This crate's futures loop is the
 driver; the machine itself never awaits (a source-level guard keeps it so) and
 is `Serialize + Deserialize`, so a run can be suspended between steps and
 resumed in another process. Resume with the same Rig version; the envelope format

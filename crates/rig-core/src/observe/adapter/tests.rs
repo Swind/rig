@@ -40,67 +40,6 @@ fn native_http_errors_preserve_distinct_boundaries_before_report_erasure() {
     }
 }
 
-#[tokio::test]
-async fn streamed_body_failure_preserves_boundary_through_provider_error_conversion() {
-    use crate::test_utils::SequencedStreamingHttpClient;
-    use futures::StreamExt;
-    let mut baseline = None;
-    for enabled in [false, true] {
-        let http =
-            SequencedStreamingHttpClient::new(vec![Err(crate::http_client::Error::instance(
-                std::io::Error::other("scripted body transfer failure"),
-            ))]);
-        let model = crate::driver::Model::new(
-            crate::providers::gemini::GeminiConfig::new("test-key").completion("gemini-test"),
-            http,
-        );
-        let log = Arc::new(ObservationLog::default());
-        let request = CompletionRequest::new("hello");
-        let mut stream = if enabled {
-            let context = AdapterContext::new(log.clone(), Subject::default(), "call");
-            model.stream_observed(request, context).unwrap()
-        } else {
-            model.stream(request).unwrap()
-        };
-        let error = loop {
-            match stream.next().await {
-                Some(Err(error)) => break error,
-                Some(Ok(_)) => {}
-                None => panic!("body error must reach the caller"),
-            }
-        };
-        drop(stream);
-        let report = crate::error::ErrorReport::from(&error);
-        if enabled {
-            assert_eq!(baseline.as_ref(), Some(&report));
-            let trace = log.trace();
-            let endings: Vec<_> = trace
-                .observations
-                .iter()
-                .filter_map(|o| match &o.action {
-                    Action::Adapter { observation } => match &observation.event {
-                        AdapterEvent::Finished { ending } => Some(ending),
-                        _ => None,
-                    },
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(
-                endings,
-                [&AdapterEnding::Error {
-                    boundary: AdapterErrorBoundary::Transport,
-                    kind: report.kind.code().into(),
-                    status: report.http_status,
-                    retryable: report.is_retryable(),
-                }]
-            );
-        } else {
-            baseline = Some(report);
-            assert!(log.trace().observations.is_empty());
-        }
-    }
-}
-
 #[test]
 fn host_attempts_share_send_ordinals_without_relabeling_in_flight_facts() {
     let log = Arc::new(ObservationLog::default());
@@ -320,24 +259,14 @@ async fn unary_failure_facts_preserve_retryability_without_copying_error_bodies(
     }
     assert_eq!(http.requests().len(), 2);
     let trace = log.trace();
-    assert_eq!(trace.observations.len(), 10);
+    // A rejected attempt never ended its reply, so it observes no usage.
+    assert_eq!(trace.observations.len(), 8);
     for (index, observation) in trace.observations.iter().enumerate() {
         let Action::Adapter { observation } = &observation.action else {
             panic!("adapter fact")
         };
-        assert_eq!(observation.attempt, Some((index / 5 + 1) as u64));
-        if index % 5 == 2 {
-            assert_eq!(
-                observation.event,
-                AdapterEvent::Usage {
-                    usage: AdapterUsage {
-                        input_tokens: Some(3),
-                        ..AdapterUsage::default()
-                    }
-                }
-            );
-        }
-        if index % 5 == 3 {
+        assert_eq!(observation.attempt, Some((index / 4 + 1) as u64));
+        if index % 4 == 2 {
             assert_eq!(
                 observation.event,
                 AdapterEvent::ErrorEnvelope {
@@ -348,7 +277,7 @@ async fn unary_failure_facts_preserve_retryability_without_copying_error_bodies(
                 }
             );
         }
-        if index % 5 == 4 {
+        if index % 4 == 3 {
             assert_eq!(
                 observation.event,
                 AdapterEvent::Finished {
@@ -367,164 +296,6 @@ async fn unary_failure_facts_preserve_retryability_without_copying_error_bodies(
             .unwrap()
             .contains("synthetic-sensitive-body")
     );
-}
-
-#[derive(Clone)]
-struct PendingHttp {
-    body_pending: bool,
-}
-
-impl crate::http_client::HttpClientExt for PendingHttp {
-    fn send<T, U>(
-        &self,
-        _request: http::Request<T>,
-    ) -> impl Future<
-        Output = crate::http_client::Result<http::Response<crate::http_client::LazyBody<U>>>,
-    > + crate::wasm_compat::WasmCompatSend
-    + 'static
-    where
-        T: Into<bytes::Bytes> + crate::wasm_compat::WasmCompatSend,
-        U: From<bytes::Bytes> + crate::wasm_compat::WasmCompatSend + 'static,
-    {
-        let body_pending = self.body_pending;
-        async move {
-            if !body_pending {
-                return std::future::pending().await;
-            }
-            let body: crate::http_client::LazyBody<U> = Box::pin(std::future::pending());
-            Ok(http::Response::new(body))
-        }
-    }
-
-    fn send_multipart<U>(
-        &self,
-        _request: http::Request<crate::http_client::MultipartForm>,
-    ) -> impl Future<
-        Output = crate::http_client::Result<http::Response<crate::http_client::LazyBody<U>>>,
-    > + crate::wasm_compat::WasmCompatSend
-    + 'static
-    where
-        U: From<bytes::Bytes> + crate::wasm_compat::WasmCompatSend + 'static,
-    {
-        std::future::pending()
-    }
-
-    fn send_streaming<T>(
-        &self,
-        _request: http::Request<T>,
-    ) -> impl Future<Output = crate::http_client::Result<crate::http_client::StreamingResponse>>
-    + crate::wasm_compat::WasmCompatSend
-    where
-        T: Into<bytes::Bytes> + crate::wasm_compat::WasmCompatSend,
-    {
-        let body_pending = self.body_pending;
-        async move {
-            if !body_pending {
-                return std::future::pending().await;
-            }
-            let body: crate::http_client::BoxedStream = Box::pin(futures::stream::pending());
-            http::Response::builder()
-                .header(http::header::CONTENT_TYPE, "text/event-stream")
-                .body(body)
-                .map_err(crate::http_client::Error::Protocol)
-        }
-    }
-}
-
-#[tokio::test]
-async fn dropping_pending_transport_or_body_closes_the_attempt_once() {
-    for body_pending in [false, true] {
-        let model = crate::driver::Model::new(
-            crate::providers::gemini::GeminiConfig::new("test-key").completion("gemini-test"),
-            PendingHttp { body_pending },
-        );
-        let log = Arc::new(ObservationLog::default());
-        let request = CompletionRequest::new("hello");
-        let context = AdapterContext::new(log.clone(), Subject::default(), "cancelled-call");
-        let mut future = Box::pin(model.call_observed(request, context));
-        assert!(futures::poll!(future.as_mut()).is_pending());
-        drop(future);
-        let trace = log.trace();
-        assert_eq!(trace.observations.len(), if body_pending { 3 } else { 2 });
-        assert!(matches!(&trace.observations.last().unwrap().action,
-            Action::Adapter { observation } if observation.event == AdapterEvent::Finished { ending: AdapterEnding::Dropped }
-        ));
-    }
-}
-
-#[tokio::test]
-async fn shared_arc_model_keeps_mixed_invocations_distinct_after_context_scope_ends() {
-    use futures::StreamExt;
-
-    let model = Arc::new(crate::driver::Model::new(
-        crate::providers::gemini::GeminiConfig::new("test-key").completion("gemini-test"),
-        PendingHttp { body_pending: true },
-    ));
-    let sink = Arc::new(ObservationLog::default());
-    let request = CompletionRequest::new("same request");
-    let mut stream = {
-        let context = AdapterContext::new(sink.clone(), Subject::default(), "stream");
-        model.stream_observed(request.clone(), context).unwrap()
-    };
-    assert!(sink.is_empty(), "stream creation remains lazy");
-    let mut unary = Box::pin(model.call_observed(
-        request,
-        AdapterContext::new(sink.clone(), Subject::default(), "unary"),
-    ));
-    assert!(futures::poll!(unary.as_mut()).is_pending());
-    // Move the lazy stream to another task before starting its HTTP attempt.
-    tokio::spawn(async move {
-        assert!(futures::poll!(stream.next()).is_pending());
-        drop(stream);
-    })
-    .await
-    .unwrap();
-    drop(unary);
-    let trace = sink.trace();
-    for operation in ["unary", "stream"] {
-        let facts: Vec<_> = trace
-            .observations
-            .iter()
-            .filter_map(|fact| {
-                let Action::Adapter { observation } = &fact.action else {
-                    return None;
-                };
-                (observation.operation == operation).then_some(observation)
-            })
-            .collect();
-        assert_eq!(facts.len(), 3);
-        assert!(facts.iter().all(|fact| fact.attempt == Some(1)));
-        assert_eq!(
-            facts.last().unwrap().event,
-            AdapterEvent::Finished {
-                ending: AdapterEnding::Dropped
-            }
-        );
-    }
-    assert_eq!(trace.observations.len(), 6);
-}
-
-#[tokio::test]
-async fn dropping_stream_pending_on_connection_or_body_closes_once() {
-    use futures::StreamExt;
-    for body_pending in [false, true] {
-        let model = crate::driver::Model::new(
-            crate::providers::gemini::GeminiConfig::new("test-key").completion("gemini-test"),
-            PendingHttp { body_pending },
-        );
-        let log = Arc::new(ObservationLog::default());
-        let request = CompletionRequest::new("hello");
-        let context = AdapterContext::new(log.clone(), Subject::default(), "pending-stream");
-        let mut stream = model.stream_observed(request, context).unwrap();
-        assert!(log.is_empty());
-        assert!(futures::poll!(stream.next()).is_pending());
-        drop(stream);
-        let trace = log.trace();
-        assert_eq!(trace.observations.len(), if body_pending { 3 } else { 2 });
-        assert!(matches!(&trace.observations.last().unwrap().action,
-            Action::Adapter { observation } if observation.event == AdapterEvent::Finished { ending: AdapterEnding::Dropped }
-        ));
-    }
 }
 
 async fn observed_stream(bytes: &str, stop_after_first: bool) -> crate::observe::ObservationTrace {
@@ -671,62 +442,14 @@ async fn corrupt_frame_is_evidence_separate_from_recovery_or_consumer_drop() {
     }
 }
 
+/// A reply that never ended observes no usage, whatever counters its body
+/// carried: usage is observed once, from the end the decoder normalized.
 #[tokio::test]
-async fn provider_terminal_does_not_hide_partial_transport_eof() {
-    let trace = observed_stream(
-        concat!(
-            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}]}\n\n",
-            "data: {",
-        ),
-        false,
-    )
-    .await;
-    let events: Vec<_> = trace
-        .observations
-        .iter()
-        .filter_map(|o| {
-            let Action::Adapter { observation } = &o.action else {
-                return None;
-            };
-            Some(&observation.event)
-        })
-        .collect();
-    assert_eq!(
-        events[3],
-        &AdapterEvent::TransportEof {
-            after: 1,
-            partial_bytes: 7
-        }
-    );
-    assert_eq!(
-        events[4],
-        &AdapterEvent::Finished {
-            ending: AdapterEnding::Terminal
-        }
-    );
-    assert_eq!(events.len(), 5);
-}
-
-#[tokio::test]
-async fn empty_unary_rejection_preserves_optional_usage_before_failure() {
+async fn empty_unary_rejection_observes_no_usage_before_failure() {
     use crate::test_utils::RecordingHttpClient;
-    for (metadata, expected) in [
-        (
-            serde_json::json!({"promptTokenCount": 7, "totalTokenCount": 9}),
-            Some(AdapterUsage {
-                input_tokens: Some(7),
-                total_tokens: Some(9),
-                ..AdapterUsage::default()
-            }),
-        ),
-        (
-            serde_json::json!({"candidatesTokenCount": 0, "promptTokenCount": -1}),
-            Some(AdapterUsage {
-                output_tokens: Some(0),
-                ..AdapterUsage::default()
-            }),
-        ),
-        (serde_json::Value::Null, None),
+    for metadata in [
+        serde_json::json!({"promptTokenCount": 7, "totalTokenCount": 9}),
+        serde_json::Value::Null,
     ] {
         let body = serde_json::json!({"candidates": [], "usageMetadata": metadata}).to_string();
         let http = RecordingHttpClient::new(body);
@@ -742,21 +465,8 @@ async fn empty_unary_rejection_preserves_optional_usage_before_failure() {
         assert_eq!(error.to_string(), plain_error.to_string());
         assert_eq!(http.requests()[0], http.requests()[1]);
         let trace = log.trace();
-        let usage: Vec<_> = trace
-            .observations
-            .iter()
-            .filter_map(|o| match &o.action {
-                Action::Adapter {
-                    observation:
-                        AdapterObservation {
-                            event: AdapterEvent::Usage { usage },
-                            ..
-                        },
-                } => Some(usage.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(usage, expected.into_iter().collect::<Vec<_>>());
+        assert!(!trace.observations.iter().any(|o| matches!(&o.action,
+            Action::Adapter { observation } if matches!(observation.event, AdapterEvent::Usage { .. }))));
         // The body named no finish reason: its frames ran out before the
         // provider ended the reply.
         assert!(matches!(&trace.observations.last().unwrap().action,
@@ -766,48 +476,7 @@ async fn empty_unary_rejection_preserves_optional_usage_before_failure() {
 }
 
 #[tokio::test]
-async fn streamed_usage_snapshots_keep_missing_counts_and_failed_attempt_usage() {
-    let bytes = concat!(
-        "data: {\"usageMetadata\":{\"promptTokenCount\":5,\"totalTokenCount\":5}}\n\n",
-        "data: {\"usageMetadata\":{\"candidatesTokenCount\":0}}\n\n",
-        "data: {\"error\":{\"code\":503,\"message\":\"unavailable\"}}\n\n",
-    );
-    let trace = observed_stream(bytes, false).await;
-    let usage: Vec<_> = trace
-        .observations
-        .iter()
-        .filter_map(|o| match &o.action {
-            Action::Adapter {
-                observation:
-                    AdapterObservation {
-                        event: AdapterEvent::Usage { usage },
-                        ..
-                    },
-            } => Some(usage.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        usage,
-        [
-            AdapterUsage {
-                input_tokens: Some(5),
-                total_tokens: Some(5),
-                ..AdapterUsage::default()
-            },
-            AdapterUsage {
-                output_tokens: Some(0),
-                ..AdapterUsage::default()
-            },
-        ]
-    );
-    assert!(matches!(&trace.observations.last().unwrap().action,
-        Action::Adapter { observation } if matches!(observation.event, AdapterEvent::Finished { ending: AdapterEnding::Error { status: Some(503), .. } })
-    ));
-}
-
-#[tokio::test]
-async fn streaming_http_rejection_preserves_usage_and_the_original_error() {
+async fn streaming_http_rejection_preserves_the_original_error() {
     use crate::test_utils::HttpErrorStreamingClient;
     use futures::StreamExt;
     let model = crate::driver::Model::new(
@@ -830,11 +499,9 @@ async fn streaming_http_rejection_preserves_usage_and_the_original_error() {
     assert!(stream.next().await.is_none());
     drop(stream);
     let trace = log.trace();
-    assert_eq!(trace.observations.len(), 5);
-    assert!(matches!(&trace.observations[2].action,
-        Action::Adapter { observation } if observation.event == AdapterEvent::Usage { usage: AdapterUsage { input_tokens: Some(3), ..AdapterUsage::default() } }
-    ));
-    assert!(matches!(&trace.observations[4].action,
+    // The rejected stream never ended its reply, so it observes no usage.
+    assert_eq!(trace.observations.len(), 4);
+    assert!(matches!(&trace.observations[3].action,
         Action::Adapter { observation } if matches!(observation.event, AdapterEvent::Finished { ending: AdapterEnding::Error { status: Some(429), retryable: true, .. } })
     ));
     assert!(
@@ -1177,4 +844,96 @@ fn a_host_scrubs_its_own_diagnostics_with_the_adapter_rules() {
         crate::observe::scrub_diagnostic("plain failure", &secrets),
         "plain failure"
     );
+}
+
+#[test]
+fn terminal_observes_nothing_without_an_open_attempt() {
+    let usage = crate::completion::Usage {
+        input_tokens: Some(3),
+        output_tokens: Some(2),
+        ..Default::default()
+    };
+    // No attempt installed: there is nothing to close.
+    let empty = AdapterSlot::default();
+    empty.terminal(Some(&usage));
+
+    // An attempt that already failed is closed: the reply's end adds no
+    // usage and no second `Finished`.
+    let log = Arc::new(ObservationLog::default());
+    let context = AdapterContext::new(log.clone(), Subject::default(), "call");
+    let request = http::Request::new(());
+    let slot = AdapterSlot::default();
+    slot.install(context.attempt_for(&request, "/completion"));
+    slot.fail(&crate::error::ProviderError::Http(
+        crate::http_client::Error::StreamEnded.into(),
+    ));
+    let before = log.trace().observations.len();
+    slot.terminal(Some(&usage));
+    drop(slot);
+    let trace = log.trace();
+    assert_eq!(trace.observations.len(), before);
+    assert!(!trace.observations.iter().any(|o| matches!(
+        &o.action,
+        Action::Adapter { observation } if matches!(
+            observation.event,
+            AdapterEvent::Usage { .. }
+                | AdapterEvent::Finished { ending: AdapterEnding::Terminal }
+        )
+    )));
+}
+
+/// Every wire's observed error envelope comes from the one locator its
+/// `ProviderResponseError` reads: (document, code, kind, message).
+#[test]
+fn observed_errors_are_located_like_the_reported_error() {
+    use serde_json::json;
+    let cases = [
+        (
+            json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}),
+            None,
+            Some("overloaded_error"),
+            Some("Overloaded"),
+        ),
+        (
+            json!({"type": "response.failed", "response": {"error": {"code": "server_error", "message": "m"}}}),
+            Some(json!("server_error")),
+            None,
+            Some("m"),
+        ),
+        (
+            json!({"error": {"code": 503, "status": "UNAVAILABLE", "message": "m"}}),
+            Some(json!(503)),
+            Some("UNAVAILABLE"),
+            Some("m"),
+        ),
+        // An error event's own `type` is its tag, not a kind.
+        (
+            json!({"type": "error", "code": "server_error", "message": "m"}),
+            Some(json!("server_error")),
+            None,
+            Some("m"),
+        ),
+        // An `error` string is the message alone.
+        (
+            json!({"error": "model failed to load"}),
+            None,
+            None,
+            Some("model failed to load"),
+        ),
+    ];
+    for (doc, code, kind, message) in cases {
+        let Some(error) = ObservedError::of(&doc) else {
+            panic!("an envelope: {doc}");
+        };
+        assert_eq!(error.code, code, "{doc}");
+        assert_eq!(error.kind.as_deref(), kind, "{doc}");
+        assert_eq!(error.message.as_deref(), message, "{doc}");
+    }
+    for doc in [
+        json!({"error": null}),
+        json!({"error": {}}),
+        json!({"id": "x"}),
+    ] {
+        assert!(ObservedError::of(&doc).is_none(), "{doc}");
+    }
 }

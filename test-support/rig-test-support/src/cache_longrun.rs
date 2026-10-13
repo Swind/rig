@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
-use rig_agent::agent::{Agent, MultiTurnStreamItem, StreamingError};
+use rig_agent::agent::{Agent, MultiTurnStreamItem};
 use rig_cassette::http::CassetteClock;
 use rig_core::completion::{CacheCost, CacheRates, Message, Usage};
 use serde::{Deserialize, Serialize};
@@ -172,16 +172,6 @@ pub async fn try_chat(
     }
 }
 
-fn streaming_status(error: &StreamingError) -> Option<http::StatusCode> {
-    match error {
-        StreamingError::Completion(error) => error.provider_response_status(),
-        StreamingError::Report(report) => report
-            .http_status
-            .and_then(|status| http::StatusCode::from_u16(status).ok()),
-        StreamingError::Prompt(error) => error.provider_response_status(),
-    }
-}
-
 /// [`chat`] over the provider's streaming endpoint.
 ///
 /// # Panics
@@ -215,7 +205,7 @@ pub async fn chat_streamed(
         }
         let error = match (done, failure) {
             (Some(response), None) => {
-                history.extend(response.messages.clone().unwrap_or_default());
+                history.extend(response.messages.clone());
                 log.usages
                     .extend(response.completion_calls.iter().map(|call| call.usage));
                 return;
@@ -223,7 +213,7 @@ pub async fn chat_streamed(
             (_, error) => error,
         };
         match (waits.next(), &error) {
-            (Some(wait), Some(failure)) if retryable(streaming_status(failure)) => {
+            (Some(wait), Some(failure)) if retryable(failure.provider_response_status()) => {
                 log.retries += 1;
                 clock.pause(Duration::from_secs(*wait)).await;
             }
@@ -292,19 +282,15 @@ impl CacheWire {
                 .next_back()
                 .map(|usage| {
                     let thoughts = count(usage, "/thoughtsTokenCount").unwrap_or(0);
-                    let usage = Usage {
-                        input_tokens: Some(
+                    let usage = Usage::new()
+                        .input_tokens(
                             count(usage, "/promptTokenCount").unwrap_or(0)
                                 + count(usage, "/toolUsePromptTokenCount").unwrap_or(0),
-                        ),
-                        cached_input_tokens: Some(
-                            count(usage, "/cachedContentTokenCount").unwrap_or(0),
-                        ),
-                        output_tokens: Some(
+                        )
+                        .cached_input_tokens(count(usage, "/cachedContentTokenCount").unwrap_or(0))
+                        .output_tokens(
                             count(usage, "/candidatesTokenCount").unwrap_or(0) + thoughts,
-                        ),
-                        ..Usage::default()
-                    };
+                        );
                     (usage, thoughts)
                 }),
             // A stream's `message_start` carries the input counters and its
@@ -347,16 +333,14 @@ impl CacheWire {
                 .filter_map(|frame| frame.get("usage").filter(|usage| !usage.is_null()))
                 .next_back()
                 .map(|usage| {
-                    let usage = Usage {
-                        input_tokens: count(usage, "/prompt_tokens"),
-                        cached_input_tokens: count(usage, "/prompt_tokens_details/cached_tokens"),
-                        cache_creation_input_tokens: count(
+                    let usage = Usage::new()
+                        .input_tokens(count(usage, "/prompt_tokens"))
+                        .cached_input_tokens(count(usage, "/prompt_tokens_details/cached_tokens"))
+                        .cache_creation_input_tokens(count(
                             usage,
                             "/prompt_tokens_details/cache_write_tokens",
-                        ),
-                        output_tokens: count(usage, "/completion_tokens"),
-                        ..Usage::default()
-                    };
+                        ))
+                        .output_tokens(count(usage, "/completion_tokens"));
                     (usage, 0)
                 }),
             Self::OpenAiResponses => frames
@@ -369,16 +353,14 @@ impl CacheWire {
                 })
                 .next_back()
                 .map(|usage| {
-                    let usage = Usage {
-                        input_tokens: count(usage, "/input_tokens"),
-                        cached_input_tokens: count(usage, "/input_tokens_details/cached_tokens"),
-                        cache_creation_input_tokens: count(
+                    let usage = Usage::new()
+                        .input_tokens(count(usage, "/input_tokens"))
+                        .cached_input_tokens(count(usage, "/input_tokens_details/cached_tokens"))
+                        .cache_creation_input_tokens(count(
                             usage,
                             "/input_tokens_details/cache_write_tokens",
-                        ),
-                        output_tokens: count(usage, "/output_tokens"),
-                        ..Usage::default()
-                    };
+                        ))
+                        .output_tokens(count(usage, "/output_tokens"));
                     (usage, 0)
                 }),
         };
@@ -1214,7 +1196,7 @@ fn without_signatures(content: &str) -> Value {
     if let Some(parts) = value.get_mut("parts").and_then(Value::as_array_mut) {
         for part in parts {
             if let Some(part) = part.as_object_mut() {
-                part.remove("thoughtSignature");
+                part.shift_remove("thoughtSignature");
             }
         }
     }

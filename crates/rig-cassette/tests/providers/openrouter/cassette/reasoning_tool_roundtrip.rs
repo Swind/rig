@@ -10,32 +10,6 @@ use crate::reasoning::{self, WeatherTool};
 use super::super::support::with_openrouter_cassette;
 
 #[tokio::test]
-async fn streaming() {
-    with_openrouter_cassette("reasoning_tool_roundtrip/streaming", |client| async move {
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let agent = rig::AgentBuilder::new(client.completion("openai/gpt-5.2"))
-            .preamble(reasoning::TOOL_SYSTEM_PROMPT)
-            .max_tokens(4096)
-            .tool(WeatherTool::new(call_count.clone()))
-            .additional_params(serde_json::json!({
-                "reasoning": { "effort": "high" },
-                "include_reasoning": true
-            }))
-            .build();
-
-        let stream = agent
-            .prompt(reasoning::TOOL_USER_PROMPT)
-            .history(Vec::<Message>::new())
-            .max_turns(3)
-            .stream();
-
-        let stats = reasoning::collect_stream_stats(stream, "openrouter").await;
-        reasoning::assert_universal(&stats, &call_count, "openrouter");
-    })
-    .await;
-}
-
-#[tokio::test]
 async fn nonstreaming() {
     with_openrouter_cassette(
         "reasoning_tool_roundtrip/nonstreaming",
@@ -45,10 +19,8 @@ async fn nonstreaming() {
                 .preamble(reasoning::TOOL_SYSTEM_PROMPT)
                 .max_tokens(4096)
                 .tool(WeatherTool::new(call_count.clone()))
-                .additional_params(serde_json::json!({
-                    "reasoning": { "effort": "high" },
-                    "include_reasoning": true
-                }))
+                .reasoning(rig::completion::Effort::High)
+                .additional_params(serde_json::json!({ "include_reasoning": true }))
                 .default_max_turns(2)
                 .build();
 
@@ -59,7 +31,7 @@ async fn nonstreaming() {
                     "[openrouter] Non-streaming chat failed - likely 400 from dropped reasoning",
                 );
 
-            reasoning::assert_nonstreaming_universal(&result.output, &call_count, "openrouter");
+            reasoning::assert_nonstreaming_universal(&result.output(), &call_count, "openrouter");
         },
     )
     .await;

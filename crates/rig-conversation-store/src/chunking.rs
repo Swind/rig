@@ -6,8 +6,8 @@ pub(crate) fn complete_exchange(messages: &[Message]) -> bool {
     let mut pending = HashSet::new();
     for message in messages {
         match message {
-            Message::Assistant { content, .. } => {
-                for item in content {
+            Message::Assistant(turn) => {
+                for item in &turn.content {
                     if let AssistantContent::ToolCall(call) = item
                         && !pending.insert(call.id.clone())
                     {
@@ -74,8 +74,8 @@ pub(crate) fn embedding_text(messages: &[Message], budget: usize) -> String {
                     append_text(&mut output, "\n", budget);
                 }
             }
-            Message::Assistant { content, .. } => {
-                for item in content {
+            Message::Assistant(turn) => {
+                for item in &turn.content {
                     match item {
                         AssistantContent::Text(text) => {
                             append_text(&mut output, &text.text, budget)
@@ -83,10 +83,14 @@ pub(crate) fn embedding_text(messages: &[Message], budget: usize) -> String {
                         AssistantContent::ToolCall(call) => {
                             append_text(&mut output, call.function.name.as_str(), budget);
                             append_text(&mut output, " ", budget);
-                            append_text(&mut output, &call.function.arguments.to_string(), budget);
+                            append_text(
+                                &mut output,
+                                &call.function.arguments_value().to_string(),
+                                budget,
+                            );
                         }
                         AssistantContent::Image(_) => append_text(&mut output, "[image]", budget),
-                        AssistantContent::Reasoning(_) => {}
+                        _ => {}
                     }
                     append_text(&mut output, "\n", budget);
                 }

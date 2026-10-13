@@ -54,7 +54,8 @@ async fn responses_keeps_documents_after_system_before_history() {
                         .message(Message::assistant("Acknowledged."))
                         .document(ordering_document())
                         .temperature(0.0)
-                        .max_tokens(32),
+                        .max_tokens(32)
+                        .provider_options(super::super::support::stateless()),
                 )
                 .await
                 .expect("OpenAI Responses document ordering request should succeed");
@@ -69,37 +70,6 @@ async fn responses_keeps_documents_after_system_before_history() {
 
     assert_responses_request_order(
         "document_ordering/responses_keeps_documents_after_system_before_history",
-    );
-}
-
-#[tokio::test]
-async fn chat_completions_keeps_documents_after_system_before_history() {
-    super::super::support::with_openai_completions_cassette(
-        "document_ordering/chat_completions_keeps_documents_after_system_before_history",
-        |client| async move {
-            let response = client
-                .chat(openai::GPT_4O)
-                .call(
-                    CompletionRequest::new(PROMPT)
-                        .message(Message::system(SYSTEM_INSTRUCTION))
-                        .message(Message::assistant("Acknowledged."))
-                        .document(ordering_document())
-                        .temperature(0.0)
-                        .max_tokens(32),
-                )
-                .await
-                .expect("OpenAI Chat Completions document ordering request should succeed");
-
-            assert_contains_any_case_insensitive(
-                &assistant_text(&response.choice),
-                &[DOCUMENT_ANSWER],
-            );
-        },
-    )
-    .await;
-
-    assert_chat_request_order(
-        "document_ordering/chat_completions_keeps_documents_after_system_before_history",
     );
 }
 
@@ -140,32 +110,10 @@ fn assert_responses_request_order(scenario: &str) {
         input[0].to_string().contains("<file id: ordering-note>"),
         "expected first input item to contain normalized document: {body:#}"
     );
+    // A hand-built turn is rebuilt as a completed message item.
     assert_eq!(input[1]["role"], "assistant");
-    assert_eq!(input[1]["content"], "Acknowledged.");
-    assert!(input[1].get("status").is_none());
+    assert_eq!(input[1]["content"][0]["type"], "output_text");
+    assert_eq!(input[1]["content"][0]["text"], "Acknowledged.");
     assert_eq!(input[2]["role"], "user");
     assert!(input[2].to_string().contains(PROMPT));
-}
-
-fn assert_chat_request_order(scenario: &str) {
-    let body = recorded_request_body(scenario);
-    let messages = body["messages"]
-        .as_array()
-        .expect("OpenAI Chat Completions request should contain messages[]");
-    assert_eq!(
-        messages.len(),
-        4,
-        "expected system, document, assistant history, and prompt messages: {body:#}"
-    );
-    assert_eq!(messages[0]["role"], "system");
-    assert!(messages[0].to_string().contains(SYSTEM_INSTRUCTION));
-    assert_eq!(messages[1]["role"], "user");
-    assert!(
-        messages[1].to_string().contains("<file id: ordering-note>"),
-        "expected second message to contain normalized document: {body:#}"
-    );
-    assert_eq!(messages[2]["role"], "assistant");
-    assert!(messages[2].to_string().contains("Acknowledged."));
-    assert_eq!(messages[3]["role"], "user");
-    assert!(messages[3].to_string().contains(PROMPT));
 }

@@ -262,7 +262,7 @@ async fn stream_error_and_unexpected_eof_replace_placeholder() -> TestResult {
         limit: 30,
         ..Default::default()
     };
-    let failure = rig_agent::agent::StreamingError::from(rig_core::memory::MemoryError::backend(
+    let failure = rig_agent::completion::PromptError::from(rig_core::memory::MemoryError::backend(
         std::io::Error::other("long error ".repeat(20)),
     ));
     let input: StreamingResult = Box::pin(futures::stream::iter(vec![

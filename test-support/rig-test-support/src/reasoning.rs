@@ -3,7 +3,6 @@
 //! These tests verify that providers can handle reasoning-enabled requests,
 //! preserve multi-turn history, and complete tool roundtrips. Visible reasoning
 //! is recorded for diagnostics when a provider emits it, but is not required.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,7 +24,7 @@ use rig_agent::agent::ReasoningDelta;
 
 use rig_agent::agent::StepEventKind;
 
-use rig_agent::agent::StreamingError;
+use rig_agent::completion::PromptError;
 
 use rig_agent::completion;
 
@@ -33,15 +32,11 @@ use rig_core::message::AssistantContent;
 
 use rig_core::message::Message;
 
-use rig_core::message::ReasoningContent;
-
 use rig_core::message::ToolResultContent;
 
 use rig_core::message::UserContent;
 
 use rig_core::streaming::{Item, StreamEvent};
-
-use rig_core::streaming::StreamedUserContent;
 
 use rig_core::tool::Tool;
 
@@ -129,13 +124,29 @@ pub async fn run_reasoning_delta_hook_streaming(
     additional_params: serde_json::Value,
     provider: &str,
 ) {
+    run_reasoning_delta_hook_streaming_with(
+        model,
+        |builder| builder.additional_params(additional_params),
+        provider,
+    )
+    .await;
+}
+
+/// [`run_reasoning_delta_hook_streaming`], with `configure` setting the
+/// agent's request options instead of raw parameters.
+pub async fn run_reasoning_delta_hook_streaming_with(
+    model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
+    configure: impl FnOnce(AgentBuilder) -> AgentBuilder,
+    provider: &str,
+) {
     let hook = ReasoningDeltaHookRecorder::default();
     let probe = hook.clone();
-    let agent = AgentBuilder::new(model)
-        .preamble("Reason carefully before giving a concise final answer.")
-        .max_tokens(4096)
-        .additional_params(additional_params)
-        .build();
+    let agent = configure(
+        AgentBuilder::new(model)
+            .preamble("Reason carefully before giving a concise final answer.")
+            .max_tokens(4096),
+    )
+    .build();
     let mut stream = agent
         .prompt(REASONING_DELTA_HOOK_PROMPT)
         .add_hook(hook)
@@ -215,6 +226,10 @@ pub struct ReasoningRoundtripAgent {
     pub preamble: String,
     /// Provider-specific parameters included in both requests.
     pub additional_params: Option<serde_json::Value>,
+    /// Generation options included in both requests.
+    pub options: rig_core::completion::GenerationOptions,
+    /// Typed provider options included in both requests.
+    pub provider_options: rig_core::completion::ProviderOptions,
     /// Opt-in capability flag. Most providers stream reasoning as unsigned
     /// deltas (or emit none at all), so the shared roundtrip only records
     /// reasoning for diagnostics. A provider whose wire is known to carry a
@@ -235,8 +250,29 @@ impl ReasoningRoundtripAgent {
             model,
             preamble: ROUNDTRIP_PREAMBLE.to_owned(),
             additional_params,
+            options: rig_core::completion::GenerationOptions::default(),
+            provider_options: rig_core::completion::ProviderOptions::new(),
             expects_signed_reasoning_block: false,
         }
+    }
+
+    /// Both requests carry `options`.
+    pub fn with_options(mut self, options: rig_core::completion::GenerationOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Both requests carry `options` as their typed provider options.
+    pub fn with_provider_options(mut self, options: rig_core::completion::ProviderOptions) -> Self {
+        self.provider_options = options;
+        self
+    }
+
+    /// Set this configuration's parameters and options on `request`.
+    fn apply(&self, request: &mut completion::CompletionRequest) {
+        request.additional_params = self.additional_params.clone();
+        request.options = self.options.clone();
+        request.provider_options = self.provider_options.clone();
     }
 
     /// See [`ReasoningRoundtripAgent::expects_signed_reasoning_block`].
@@ -244,19 +280,6 @@ impl ReasoningRoundtripAgent {
         self.expects_signed_reasoning_block = true;
         self
     }
-}
-
-/// The issuer the reply's reasoning was sealed to, or its provider when it
-/// sent none.
-fn stream_issuer(response: &completion::CompletionResponse) -> rig_core::message::Issuer {
-    response
-        .choice
-        .iter()
-        .find_map(|content| match content {
-            AssistantContent::Reasoning(reasoning) => Some(reasoning.issuer().clone()),
-            _ => None,
-        })
-        .unwrap_or_else(|| rig_core::message::Issuer::from(response.provider.clone()))
 }
 
 /// Run and assert the two-turn streaming reasoning-history roundtrip.
@@ -275,21 +298,11 @@ pub async fn run_reasoning_roundtrip_streaming_with_final<F>(
         content: vec![UserContent::text(ROUNDTRIP_TURN1_TEXT)],
     };
 
-    let request = completion::CompletionRequest {
-        chat_history: vec![
-            Message::system(agent.preamble.clone()),
-            turn1_prompt.clone(),
-        ],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: agent.additional_params.clone(),
-        model: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    };
+    let mut request = completion::CompletionRequest::from(vec![
+        Message::system(agent.preamble.clone()),
+        turn1_prompt.clone(),
+    ]);
+    agent.apply(&mut request);
 
     let mut stream = agent.model.stream(request).expect("Turn 1 stream");
 
@@ -307,9 +320,7 @@ pub async fn run_reasoning_roundtrip_streaming_with_final<F>(
 
     if agent.expects_signed_reasoning_block {
         let signed = response.choice.iter().any(|content| match content {
-            AssistantContent::Reasoning(reasoning) => reasoning
-                .open(reasoning.issuer())
-                .is_some_and(|reasoning| reasoning.content.iter().any(|block| matches!(block, ReasoningContent::Text { signature, .. } if signature.is_some()))),
+            AssistantContent::Reasoning(reasoning) => reasoning.native.is_some(),
             _ => false,
         });
         assert!(
@@ -322,70 +333,22 @@ pub async fn run_reasoning_roundtrip_streaming_with_final<F>(
 
     assert!(!streamed_text.is_empty(), "Turn 1 produced no text output.");
 
-    // The history this suite recorded replays the reasoning the provider
-    // announced (an id, a signature, or content other than plain text) and
-    // the answer's text. A stream that only sent reasoning fragments
-    // replays them as one part.
-    let reasoning: Vec<_> = response
-        .choice
-        .iter()
-        .filter(|content| match content {
-            AssistantContent::Reasoning(reasoning) => {
-                reasoning.open(reasoning.issuer()).is_some_and(|reasoning| {
-                    reasoning.id.is_some()
-                        || reasoning.content.iter().any(|block| {
-                            !matches!(
-                                block,
-                                ReasoningContent::Text {
-                                    signature: None,
-                                    ..
-                                }
-                            )
-                        })
-                })
-            }
-            _ => false,
-        })
-        .cloned()
-        .collect();
-    let mut assistant_content = if reasoning.is_empty() {
-        let fragments = response.reasoning();
-        if fragments.is_empty() {
-            Vec::new()
-        } else {
-            vec![AssistantContent::Reasoning(
-                rig_core::message::Reasoning::new(&fragments).sealed(stream_issuer(&response)),
-            )]
-        }
-    } else {
-        reasoning
-    };
-    assistant_content.push(AssistantContent::text(&streamed_text));
-    let turn1_assistant = Message::Assistant {
-        id: response.message_id.clone(),
-        content: assistant_content,
-    };
+    // The history replays the turn exactly as it arrived.
+    let turn1_assistant = response.message().expect("Turn 1 produced content");
 
     let turn2_prompt = Message::User {
         content: vec![UserContent::text(ROUNDTRIP_TURN2_TEXT)],
     };
 
-    let request2 = completion::CompletionRequest {
-        chat_history: vec![
+    let request2 = {
+        let mut request = completion::CompletionRequest::from(vec![
             Message::system(agent.preamble.clone()),
             turn1_prompt,
             turn1_assistant,
             turn2_prompt,
-        ],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: agent.additional_params.clone(),
-        model: None,
-        output_schema: None,
-        record_telemetry_content: false,
+        ]);
+        agent.apply(&mut request);
+        request
     };
 
     let mut stream2 = agent.model.stream(request2).expect("Turn 2 stream");
@@ -421,21 +384,11 @@ pub async fn run_reasoning_roundtrip_nonstreaming(agent: ReasoningRoundtripAgent
         content: vec![UserContent::text(ROUNDTRIP_TURN1_TEXT)],
     };
 
-    let request = completion::CompletionRequest {
-        chat_history: vec![
-            Message::system(agent.preamble.clone()),
-            turn1_prompt.clone(),
-        ],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: agent.additional_params.clone(),
-        model: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    };
+    let mut request = completion::CompletionRequest::from(vec![
+        Message::system(agent.preamble.clone()),
+        turn1_prompt.clone(),
+    ]);
+    agent.apply(&mut request);
 
     let response = agent.model.call(request).await.expect("Turn 1 completion");
 
@@ -456,31 +409,21 @@ pub async fn run_reasoning_roundtrip_nonstreaming(agent: ReasoningRoundtripAgent
         "Turn 1 non-streaming response has no text output."
     );
 
-    let turn1_assistant = Message::Assistant {
-        id: response.message_id,
-        content: response.choice,
-    };
+    let turn1_assistant = response.message().expect("Turn 1 produced content");
 
     let turn2_prompt = Message::User {
         content: vec![UserContent::text(ROUNDTRIP_TURN2_TEXT)],
     };
 
-    let request2 = completion::CompletionRequest {
-        chat_history: vec![
+    let request2 = {
+        let mut request = completion::CompletionRequest::from(vec![
             Message::system(agent.preamble.clone()),
             turn1_prompt,
             turn1_assistant,
             turn2_prompt,
-        ],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: agent.additional_params.clone(),
-        model: None,
-        output_schema: None,
-        record_telemetry_content: false,
+        ]);
+        agent.apply(&mut request);
+        request
     };
 
     let response2 = agent
@@ -587,11 +530,10 @@ Based on the weather conditions, should I pack an umbrella or sunscreen? \
 Use the get_weather tool to check before answering.";
 
 /// Reasoning, tool, text, and termination observations from an agent stream.
+#[derive(Default)]
 pub struct StreamStats {
     /// Number of complete reasoning blocks observed.
     pub reasoning_block_count: usize,
-    /// Number of reasoning deltas observed.
-    pub reasoning_delta_count: usize,
     /// Reasoning content variant names in observation order.
     pub reasoning_content_types: Vec<&'static str>,
     /// Whether any reasoning text carried a signature.
@@ -612,48 +554,6 @@ pub struct StreamStats {
     pub got_final_response: bool,
     /// Formatted stream errors in observation order.
     pub errors: Vec<String>,
-    /// Event-kind labels in stream order for ordering assertions.
-    pub events: Vec<&'static str>,
-}
-
-impl StreamStats {
-    fn new() -> Self {
-        Self {
-            reasoning_block_count: 0,
-            reasoning_delta_count: 0,
-            reasoning_content_types: vec![],
-            reasoning_has_signature: false,
-            reasoning_has_encrypted: false,
-            tool_calls_in_stream: vec![],
-            tool_results_in_stream: 0,
-            text_chunks: 0,
-            final_turn_text: String::new(),
-            final_response_text: None,
-            got_final_response: false,
-            errors: vec![],
-            events: vec![],
-        }
-    }
-
-    /// Count complete reasoning blocks and reasoning deltas together.
-    pub fn total_reasoning(&self) -> usize {
-        self.reasoning_block_count + self.reasoning_delta_count
-    }
-
-    /// Whether reasoning was observed before the first tool call, or without a call.
-    pub fn reasoning_before_first_tool_call(&self) -> bool {
-        let first_reasoning = self
-            .events
-            .iter()
-            .position(|event| event.starts_with("reasoning"));
-        let first_tool_call = self.events.iter().position(|event| *event == "tool_call");
-
-        match (first_reasoning, first_tool_call) {
-            (Some(reasoning), Some(tool_call)) => reasoning < tool_call,
-            (Some(_), None) => true,
-            _ => false,
-        }
-    }
 }
 
 fn record_reasoning(
@@ -662,38 +562,33 @@ fn record_reasoning(
     provider: &str,
 ) {
     stats.reasoning_block_count += 1;
-    stats.events.push("reasoning_block");
 
-    for content in &reasoning.content {
-        let type_name = match content {
-            ReasoningContent::Text { signature, .. } => {
-                if signature.is_some() {
-                    stats.reasoning_has_signature = true;
-                }
-                "Text"
-            }
-            ReasoningContent::Encrypted(_) => {
-                stats.reasoning_has_encrypted = true;
-                "Encrypted"
-            }
-            ReasoningContent::Summary(_) => "Summary",
-            ReasoningContent::Redacted { .. } => "Redacted",
-        };
-        stats.reasoning_content_types.push(type_name);
-    }
+    let item = reasoning.native.as_ref().map(|native| &native.item);
+    let has = |key: &str| {
+        item.and_then(|item| item.get(key))
+            .is_some_and(|value| value.as_str().is_none_or(|value| !value.is_empty()))
+    };
+    stats.reasoning_has_signature |= has("signature") || has("thoughtSignature");
+    stats.reasoning_has_encrypted |= has("encrypted_content");
+    stats.reasoning_content_types.push(if reasoning.redacted {
+        "Redacted"
+    } else {
+        "Text"
+    });
 
     eprintln!(
-        "[{provider}] Reasoning block: id={:?}, types={:?}",
-        reasoning.id, stats.reasoning_content_types
+        "[{provider}] Reasoning block: item={:?}, types={:?}",
+        item.and_then(|item| item.get("type")),
+        stats.reasoning_content_types
     );
 }
 
 /// Drain an agent stream into observations, retaining errors for later assertions.
 pub async fn collect_stream_stats(
-    stream: impl futures::Stream<Item = Result<MultiTurnStreamItem, StreamingError>>,
+    stream: impl futures::Stream<Item = Result<MultiTurnStreamItem, PromptError>>,
     provider: &str,
 ) -> StreamStats {
-    let mut stats = StreamStats::new();
+    let mut stats = StreamStats::default();
 
     futures::pin_mut!(stream);
 
@@ -703,50 +598,24 @@ pub async fn collect_stream_stats(
                 stats
                     .tool_calls_in_stream
                     .push(tool_call.function.name.clone().into());
-                stats.events.push("tool_call");
             }
             Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => match content {
                 Item::Event(StreamEvent::End {
                     content: AssistantContent::Reasoning(ref reasoning),
                     ..
                 }) => {
-                    if let Some(reasoning) = reasoning.open(reasoning.issuer()) {
-                        record_reasoning(&mut stats, reasoning, provider);
-                    }
-                }
-                Item::Event(StreamEvent::Reasoning { .. }) => {
-                    stats.reasoning_delta_count += 1;
-                    if stats.events.last() != Some(&"reasoning_delta") {
-                        stats.events.push("reasoning_delta");
-                    }
+                    record_reasoning(&mut stats, reasoning, provider);
                 }
                 Item::Event(StreamEvent::Text { ref text, .. }) => {
                     stats.text_chunks += 1;
                     stats.final_turn_text.push_str(text);
-                    if stats.events.last() != Some(&"text") {
-                        stats.events.push("text");
-                    }
                 }
-                Item::Event(StreamEvent::Arguments { .. }) => {
-                    if stats.events.last() != Some(&"tool_call_delta") {
-                        stats.events.push("tool_call_delta");
-                    }
-                }
-                Item::Unknown(_) => {
-                    stats.events.push("unknown");
-                }
-                Item::Event(StreamEvent::Start { .. } | StreamEvent::End { .. }) => {}
+                Item::Event(_) | Item::Unknown(_) => {}
             },
-            Ok(MultiTurnStreamItem::CompletionCall(_)) => {
-                stats.events.push("final");
+            Ok(MultiTurnStreamItem::ToolResult { .. }) => {
+                stats.tool_results_in_stream += 1;
+                stats.final_turn_text.clear();
             }
-            Ok(MultiTurnStreamItem::StreamUserItem(ref content)) => match content {
-                StreamedUserContent::ToolResult { .. } => {
-                    stats.tool_results_in_stream += 1;
-                    stats.final_turn_text.clear();
-                    stats.events.push("tool_result");
-                }
-            },
             Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                 stats.final_response_text = Some(response.output().to_owned());
                 stats.got_final_response = true;
@@ -917,7 +786,7 @@ pub fn assert_chat_history_preserves_reasoning_tool_roundtrip(
                     }
                 }
             }
-            Message::Assistant { content, .. } => {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 let mut assistant_text = String::new();
 
                 for item in content.iter() {

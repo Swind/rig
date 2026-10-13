@@ -1,7 +1,7 @@
 use anyhow::ensure;
 use rig_core::completion::message::{
-    AssistantContent, DocumentSourceKind, Image, Message, Text, ToolCall, ToolFunction, ToolName,
-    ToolResultContent, UserContent,
+    AssistantContent, AssistantMessage, DocumentSourceKind, Image, Message, Origin, Text, ToolCall,
+    ToolFunction, ToolName, ToolResultContent, UserContent,
 };
 
 use super::{Storage, StorageError};
@@ -261,16 +261,22 @@ async fn concurrent_handles_allocate_contiguous_positions() -> anyhow::Result<()
 async fn partial_tool_exchanges_wait_and_originals_roundtrip() -> anyhow::Result<()> {
     let store = Storage::open(":memory:", "test".into()).await?;
     let id = "conversation".into();
-    let call = ToolCall::from_dual_wire(
-        "fc-item",
+    let call = ToolCall::from_wire(
         "call-correlator",
         ToolFunction::new(ToolName::new("lookup")?, serde_json::json!({"name":"東京"})),
-    )
-    .with_signature(Some("opaque signature".into()));
-    let assistant = Message::Assistant {
-        id: Some("provider-message".into()),
-        content: vec![AssistantContent::ToolCall(call.clone())],
-    };
+    );
+    let block = AssistantContent::ToolCall(call.clone()).with_native(serde_json::json!({
+        "type": "function_call",
+        "id": "fc-item",
+        "call_id": "call-correlator",
+        "signature": "opaque signature",
+    }));
+    let assistant =
+        Message::Assistant(AssistantMessage::new(vec![block]).with_origin(Origin::new(
+            "openai.responses",
+            "openai",
+            "test",
+        )));
     let result = Message::User {
         content: vec![UserContent::ToolResult(call.result(vec![
             ToolResultContent::Text(Text::new("literal")),

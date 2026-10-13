@@ -277,7 +277,7 @@ async fn hooks_finish_while_reaction_network_is_blocked() -> Result<(), Box<dyn 
     let final_reply = tokio::time::timeout(Duration::from_millis(1), async {
         while let Some(item) = stream.next().await {
             if matches!(item?, MultiTurnStreamItem::FinalResponse(_)) {
-                return Ok::<_, rig_agent::agent::StreamingError>(true);
+                return Ok::<_, rig_agent::completion::PromptError>(true);
             }
         }
         Ok(false)

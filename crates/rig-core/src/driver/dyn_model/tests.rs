@@ -2,91 +2,23 @@
 //! response, the same stream items (including each part's `End` content), the same
 //! span fields.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-
 use futures::StreamExt;
 use serde_json::{Value, json};
-use tracing::Subscriber;
-use tracing::field::{Field, Visit};
-use tracing::span::{Attributes, Id, Record};
-use tracing_subscriber::layer::{Context, SubscriberExt};
-use tracing_subscriber::{Layer, Registry, registry::LookupSpan};
 
 use super::DynModel;
 use crate::completion::{CompletionRequest, Usage};
 use crate::message::AssistantContent;
 use crate::operation::Completion;
 use crate::streaming::StreamEvent;
-use crate::test_utils::{MockCompletionModel, MockStreamEvent, MockTurn};
+use crate::test_utils::{
+    CapturedSpan, MockCompletionModel, MockStreamEvent, MockTurn, TraceCapture,
+};
 
-/// Every span opened while a body runs: name, target, declared fields and
-/// recorded values.
-#[derive(Clone, Default)]
-struct Spans {
-    spans: Arc<Mutex<Vec<Value>>>,
-    index: Arc<Mutex<BTreeMap<u64, usize>>>,
-}
-
-struct Values<'a>(&'a mut serde_json::Map<String, Value>);
-
-impl Visit for Values<'_> {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.0
-            .insert(field.name().into(), json!(format!("{value:?}")));
-    }
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.0.insert(field.name().into(), json!(value));
-    }
-    fn record_u64(&mut self, field: &Field, value: u64) {
-        self.0.insert(field.name().into(), json!(value));
-    }
-    fn record_i64(&mut self, field: &Field, value: i64) {
-        self.0.insert(field.name().into(), json!(value));
-    }
-    fn record_bool(&mut self, field: &Field, value: bool) {
-        self.0.insert(field.name().into(), json!(value));
-    }
-}
-
-impl<S> Layer<S> for Spans
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-{
-    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _: Context<'_, S>) {
-        let metadata = attrs.metadata();
-        let mut values = serde_json::Map::new();
-        attrs.record(&mut Values(&mut values));
-        let fields: Vec<&str> = metadata.fields().iter().map(|field| field.name()).collect();
-        let mut spans = self.spans.lock().expect("spans");
-        self.index
-            .lock()
-            .expect("index")
-            .insert(id.into_u64(), spans.len());
-        spans.push(json!({
-            "name": metadata.name(),
-            "target": metadata.target(),
-            "fields": fields,
-            "values": Value::Object(values),
-        }));
-    }
-
-    fn on_record(&self, id: &Id, record: &Record<'_>, _: Context<'_, S>) {
-        let Some(&index) = self.index.lock().expect("index").get(&id.into_u64()) else {
-            return;
-        };
-        let mut spans = self.spans.lock().expect("spans");
-        if let Some(values) = spans[index]["values"].as_object_mut() {
-            record.record(&mut Values(values));
-        }
-    }
-}
-
-/// Run `body` under a fresh capturing subscriber and return what it opened.
+/// Every span `body` opens, without ids.
 fn spans_of(body: impl FnOnce()) -> Vec<Value> {
-    let spans = Spans::default();
-    tracing::subscriber::with_default(Registry::default().with(spans.clone()), body);
-    spans.spans.lock().expect("spans").clone()
+    let capture = TraceCapture::default();
+    tracing::subscriber::with_default(capture.subscriber(), body);
+    capture.spans().iter().map(CapturedSpan::summary).collect()
 }
 
 fn request() -> CompletionRequest {
@@ -106,7 +38,6 @@ fn usage() -> Usage {
 
 fn unary_turn() -> MockTurn {
     MockTurn::tool_call("call_1", "lookup", json!({"q": 1}))
-        .with_message_id("msg_1")
         .with_response_id("resp_1")
         .with_provider_request_id("req_1")
         .with_usage(usage())
@@ -114,7 +45,6 @@ fn unary_turn() -> MockTurn {
 
 fn stream_turn() -> Vec<MockStreamEvent> {
     vec![
-        MockStreamEvent::message_id("msg_1"),
         MockStreamEvent::text("hel"),
         MockStreamEvent::text("lo"),
         MockStreamEvent::tool_call("call_1", "lookup", json!({"q": 1})),
@@ -223,4 +153,115 @@ fn an_erased_call_on_a_borrowed_prompt_outlives_the_prompt() {
     };
     let response = futures::executor::block_on(future).expect("the call succeeds");
     assert_eq!(response.text(), "hi");
+}
+
+/// A model connected through the catalog, with a transport that records
+/// what it sends.
+fn connected(reference: &str) -> (DynModel<Completion>, crate::test_utils::RecordingHttpClient) {
+    let http = crate::test_utils::RecordingHttpClient::new("{}");
+    let model = crate::catalog::Catalog::builtin()
+        .connect_with(
+            reference,
+            crate::providers::registry::ConnectOptions::new()
+                .api_key("sk-test")
+                .http(http.clone()),
+        )
+        .expect("connects");
+    (model, http)
+}
+
+/// `check` lists every option the model refuses, the catalog's and the
+/// wire's, sends nothing, and leaves a request it accepts alone.
+#[test]
+fn check_lists_every_refusal_and_sends_nothing() {
+    use crate::completion::{CacheRetention, CheckError, Effort, Reasoning};
+    let (model, http) = connected("openai/gpt-6-sol");
+    let request = CompletionRequest::new("hi").temperature(0.2).options(
+        crate::completion::GenerationOptions::default()
+            .reasoning(Reasoning::Budget { tokens: 2048 })
+            .top_p(0.9)
+            .cache(CacheRetention::Long),
+    );
+    let Err(CheckError::Unsupported(refused)) = model.check(&request) else {
+        panic!("GPT-6 Sol refuses a budget and sampling while it reasons");
+    };
+    let options: Vec<&str> = refused
+        .iter()
+        .map(|refusal| refusal.option.as_ref())
+        .collect();
+    assert_eq!(
+        options,
+        ["reasoning", "top_p", "temperature"],
+        "{refused:?}"
+    );
+    assert!(
+        refused
+            .iter()
+            .all(|refusal| refusal.provider == "openai" && refusal.model == "gpt-6-sol")
+    );
+    assert!(http.requests().is_empty(), "a check sends nothing");
+
+    let fine = CompletionRequest::new("hi").reasoning(Effort::High);
+    assert!(model.check(&fine).is_ok());
+    let unchecked = CompletionRequest::new("hi").temperature(0.2);
+    assert!(
+        model.check(&unchecked).is_ok(),
+        "a request with default options is not checked against the catalog"
+    );
+}
+
+/// A request that cannot be built for another reason is `Invalid`, whatever
+/// it refuses.
+#[test]
+fn check_reports_a_request_that_cannot_be_built() {
+    use crate::completion::CheckError;
+    let (model, _) = connected("openai/gpt-6-sol");
+    let mut request = CompletionRequest::new("hi").temperature(0.2).top_p(0.9);
+    request.chat_history.clear();
+    assert!(matches!(model.check(&request), Err(CheckError::Invalid(_))));
+}
+
+/// The refusals `check` lists are what sending reports one at a time: under
+/// `Error` the call fails with the first.
+#[tokio::test]
+async fn check_lists_first_what_the_call_refuses() {
+    use crate::completion::CheckError;
+    let (model, _) = connected("anthropic/claude-fable-5");
+    let request = CompletionRequest::new("hi").temperature(0.2).top_p(0.9);
+    let Err(CheckError::Unsupported(refused)) = model.check(&request) else {
+        panic!("Claude Fable 5 takes no sampling parameters");
+    };
+    let Err(crate::error::ProviderError::UnsupportedOption(first)) = model.call(request).await
+    else {
+        panic!("the call is refused");
+    };
+    assert_eq!(refused.first(), Some(&first));
+    assert_eq!(refused.len(), 2, "{refused:?}");
+}
+
+/// A typed model checks as its type-erased form does, and the error names
+/// every refusal on one line.
+#[test]
+fn a_typed_model_checks_as_its_erased_form_does() {
+    use crate::completion::CheckError;
+    let http = crate::test_utils::RecordingHttpClient::new("{}");
+    let wire =
+        crate::providers::anthropic::AnthropicConfig::new("sk-test").completion("claude-fable-5");
+    let model = crate::driver::Model::new(wire, http.clone());
+    let request = CompletionRequest::new("hi").temperature(0.2).top_p(0.9);
+    let Err(error @ CheckError::Unsupported(_)) = model.check(&request) else {
+        panic!("Claude Fable 5 takes no sampling parameters");
+    };
+    let (erased, _) = connected("anthropic/claude-fable-5");
+    let Err(CheckError::Unsupported(refused)) = erased.check(&request) else {
+        panic!("the erased model refuses the same");
+    };
+    let line = refused
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert_eq!(error.to_string(), line);
+    assert_eq!(refused.len(), 2, "{refused:?}");
+    assert!(http.requests().is_empty(), "a check sends nothing");
 }

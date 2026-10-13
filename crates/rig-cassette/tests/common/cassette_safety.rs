@@ -29,7 +29,6 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
             "with_openai_lifecycle_cassette",
             "with_openai_prompt_caching_cassette",
             "with_openai_completions_prompt_caching_cassette",
-            "with_openai_turn_metadata_cassette",
             "with_openai_cassette_bogus_key",
             "with_openai_completions_cassette",
             "with_openai_cassette_result",
@@ -76,6 +75,7 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
         source_dir: "tests/providers/anthropic/cassette",
         wrapper_names: &[
             "with_anthropic_cassette",
+            "with_anthropic_checked_cassette",
             "with_anthropic_long_run_cassette",
             "with_anthropic_model_session_cassette",
             "with_anthropic_lifecycle_cassette",
@@ -141,6 +141,7 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
         wrapper_names: &[
             "with_gemini_prompt_caching_cassette",
             "with_gemini_cassette",
+            "with_gemini_checked_cassette",
             "with_gemini_corpus_retrieval_cassette",
             "with_gemini_corpus_delta_cassette",
             "with_gemini_corpus_breadth_cassette",
@@ -200,6 +201,7 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
         wrapper_names: &[
             "with_openrouter_prompt_caching_cassette",
             "with_openrouter_cassette",
+            "with_openrouter_checked_cassette",
             "with_openrouter_cassette_result",
             "with_openrouter_cassette_bogus_key_result",
             "with_openrouter_openai_cassette",
@@ -590,6 +592,24 @@ fn scan_dir(dir: &Path, failures: &mut Vec<String>) {
 
         if path.is_dir() {
             scan_dir(&path, failures);
+            continue;
+        }
+
+        if let Some(stem) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".requests.json"))
+        {
+            // A request snapshot describes its fixture's recorded requests.
+            if !path.with_file_name(format!("{stem}.yaml")).is_file() {
+                failures.push(format!(
+                    "{} is a request snapshot with no fixture beside it; run \
+                     `cargo xtask cassette snapshots`",
+                    display_repo_path(&path)
+                ));
+            }
+            let contents = fs::read_to_string(&path).expect("snapshot should be readable as UTF-8");
+            failures.extend(crate::cassettes::artifact_safety_failures(&path, &contents));
             continue;
         }
 

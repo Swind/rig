@@ -10,21 +10,19 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::StreamExt;
+use serde_json::json;
 
 use super::{Model, Transport};
 use crate::completion::CompletionRequest;
 use crate::error::{EncodeError, ProviderError};
 use crate::http_client::framing::Framing;
 use crate::message::{CallId, ToolName};
-use crate::model::{ModelInfo, ModelList};
-use crate::observe::{
-    AdapterContext, AdapterEvent, AdapterUsage, AdapterVerdict, ObservationLog, Subject,
-};
-use crate::operation::{Completion, Finish, ModelListing, ModelPage, TextPart};
+use crate::observe::{AdapterContext, AdapterVerdict, ObservationLog, Subject};
+use crate::operation::{Block, Completion, Finish};
 use crate::streaming::Streamed;
 use crate::test_utils::{
-    HttpErrorStreamingClient, MockHttpResponse, MockStreamingClient, NonSuccessStreamingClient,
-    RecordingHttpClient, SequencedHttpClient, SequencedStreamingHttpClient,
+    MockHttpResponse, MockStreamingClient, NonSuccessStreamingClient, RecordingHttpClient,
+    SequencedHttpClient, TraceCapture,
 };
 use crate::wire::{
     Body, Decoder, Descriptor, Encoded, Flow, Mode, ObservationSink, Out, Wire, WireEvent,
@@ -65,6 +63,49 @@ where
         Some(context) => model.stream_observed(request, context),
         None => model.stream(request),
     }
+}
+
+/// One observed reply of `wire` over `http` in `mode`: the usage
+/// observations it emitted, in order, and the response's usage.
+///
+/// # Panics
+///
+/// When the reply does not fold.
+pub(crate) async fn observed_usage<W, T>(
+    wire: W,
+    http: T,
+    mode: crate::wire::Mode,
+) -> (Vec<crate::observe::AdapterUsage>, crate::completion::Usage)
+where
+    W: crate::wire::Wire<Op = crate::operation::Completion>,
+    T: Transport<W>,
+{
+    use crate::observe::{Action, AdapterContext, AdapterEvent, ObservationLog, Subject};
+    let log = std::sync::Arc::new(ObservationLog::default());
+    let context = AdapterContext::new(log.clone(), Subject::default(), "call");
+    let model = Model::new(wire, http);
+    let request = crate::completion::CompletionRequest::new("hi");
+    let response = match mode {
+        crate::wire::Mode::Unary => model.call_observed(request, context).await,
+        crate::wire::Mode::Streaming => match model.stream_observed(request, context) {
+            Ok(stream) => stream.finish().await,
+            Err(error) => Err(error),
+        },
+    }
+    .unwrap_or_else(|error| panic!("the reply folds: {error}"));
+    let observed = log
+        .trace()
+        .observations
+        .iter()
+        .filter_map(|observation| match &observation.action {
+            Action::Adapter { observation } => match &observation.event {
+                AdapterEvent::Usage { usage } => Some(usage.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    (observed, response.usage)
 }
 
 // ── the fake completion wire ────────────────────────────────────────────
@@ -124,6 +165,8 @@ enum Frame {
         arguments: String,
         usage: Option<Usage>,
     },
+    /// The provider's in-band failure, ending the stream without an end.
+    Error { message: String },
 }
 
 #[derive(Clone, Copy, serde::Deserialize)]
@@ -133,7 +176,7 @@ struct Usage {
 
 #[derive(Default)]
 struct EchoDecoder<'id> {
-    text: Option<TextPart<'id>>,
+    brand: std::marker::PhantomData<fn(&'id ()) -> &'id ()>,
 }
 
 impl<'id> Decoder<'id, Completion> for EchoDecoder<'id> {
@@ -141,7 +184,7 @@ impl<'id> Decoder<'id, Completion> for EchoDecoder<'id> {
 
     fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
         crate::providers::internal::wire::classify_tagged_frame(&frame.as_str(), "type", |kind| {
-            matches!(kind, "message" | "delta" | "stop" | "tool")
+            matches!(kind, "message" | "delta" | "stop" | "tool" | "error")
         })
     }
 
@@ -153,26 +196,34 @@ impl<'id> Decoder<'id, Completion> for EchoDecoder<'id> {
         match event {
             // A whole message is the stream's text and end in one frame.
             Frame::Message { text, usage } => {
-                self.push_text(&mut out, &text);
-                return Ok(self.end(out, usage));
+                out.run(Block::Text, &text)?;
+                return self.end(out, usage);
             }
-            Frame::Delta { text } => self.push_text(&mut out, &text),
-            Frame::Stop { usage } => return Ok(self.end(out, usage)),
+            Frame::Delta { text } => {
+                out.run(Block::Text, &text)?;
+            }
+            Frame::Stop { usage } => return self.end(out, usage),
+            Frame::Error { message } => return Err(ProviderError::Provider(message)),
             Frame::Tool {
                 name,
                 arguments,
                 usage,
             } => {
-                if let Some(part) = self.text.take() {
-                    out.close_text(part);
-                }
+                out.end_run()?;
                 let name = ToolName::new(name)
                     .map_err(|error| ProviderError::Response(error.to_string()))?;
-                let part = out.call(CallId::from_wire("call_1"), name)?;
-                out.push_arguments(&part, &arguments);
-                out.close_call(part)?;
+                let index = out.fresh_index();
+                out.whole(
+                    index,
+                    Block::Call {
+                        id: CallId::from_wire("call_1"),
+                        name,
+                    },
+                    serde_json::Value::Null,
+                    &arguments,
+                )?;
                 if let Some(usage) = usage {
-                    return Ok(self.end(out, usage));
+                    return self.end(out, usage);
                 }
             }
         }
@@ -181,41 +232,23 @@ impl<'id> Decoder<'id, Completion> for EchoDecoder<'id> {
 }
 
 impl<'id> EchoDecoder<'id> {
-    fn push_text(&mut self, out: &mut Out<'id, Completion>, text: &str) {
-        let part = self.text.get_or_insert_with(|| out.text());
-        out.push_text(part, text);
-    }
-
-    fn end(&mut self, mut out: Out<'id, Completion>, usage: Usage) -> Flow {
-        if let Some(part) = self.text.take() {
-            out.close_text(part);
-        }
-        out.end(Finish {
+    fn end(&mut self, mut out: Out<'id, Completion>, usage: Usage) -> Result<Flow, ProviderError> {
+        out.end_run()?;
+        Ok(out.end(Finish {
             usage: crate::completion::Usage {
                 output_tokens: Some(usage.output_tokens),
                 ..crate::completion::Usage::default()
             },
             model: Some("echo-1".to_owned()),
             ..Finish::default()
-        })
+        }))
     }
 }
 
 impl EchoDecoder<'_> {
     fn project(payload: &[u8], sink: &mut ObservationSink<'_>) {
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
+        if serde_json::from_slice::<serde_json::Value>(payload).is_err() {
             return;
-        };
-        if let Some(tokens) = value
-            .pointer("/usage/output_tokens")
-            .and_then(|v| v.as_u64())
-        {
-            sink.emit(AdapterEvent::Usage {
-                usage: AdapterUsage {
-                    output_tokens: Some(tokens),
-                    ..AdapterUsage::default()
-                },
-            });
         }
         sink.provider(
             AdapterVerdict {
@@ -227,14 +260,86 @@ impl EchoDecoder<'_> {
     }
 }
 
+impl crate::completion::ReplayTarget for Echo {
+    fn map_options(
+        &self,
+        _request: &crate::completion::CompletionRequest,
+        fields: crate::completion::options::OptionFields<'_>,
+    ) -> crate::completion::options::OptionMap {
+        crate::test_utils::refuse_options(fields)
+    }
+
+    fn api(&self) -> crate::message::Api {
+        crate::message::Api::from_static("echo.chat")
+    }
+
+    fn provider(&self) -> &str {
+        "echo"
+    }
+
+    fn model(&self) -> &str {
+        "echo-1"
+    }
+
+    fn accepts(&self, _model: &str) -> crate::completion::Accepts {
+        crate::completion::Accepts::ALL
+    }
+}
+
+/// The unary `message` document the fake wire's frames add up to: delta
+/// texts append, a stop gives the usage, a whole message or call is kept.
+#[derive(Default)]
+struct EchoDocument(Option<serde_json::Map<String, serde_json::Value>>);
+
+impl crate::wire::document::Serves<Completion> for EchoDocument {}
+
+impl crate::wire::document::Reassemble<WireFrame> for EchoDocument {
+    fn absorb(&mut self, frame: &WireFrame) {
+        let Ok(serde_json::Value::Object(frame)) = serde_json::from_str(&frame.as_str()) else {
+            return;
+        };
+        let document = self.0.get_or_insert_with(|| {
+            serde_json::Map::from_iter([
+                ("type".to_owned(), json!("message")),
+                ("text".to_owned(), json!("")),
+            ])
+        });
+        match frame.get("type").and_then(serde_json::Value::as_str) {
+            Some("message") => *document = frame,
+            Some("delta") => {
+                let text = frame.get("text").and_then(serde_json::Value::as_str);
+                if let (Some(serde_json::Value::String(held)), Some(text)) =
+                    (document.get_mut("text"), text)
+                {
+                    held.push_str(text);
+                }
+            }
+            Some("stop" | "tool") => {
+                for (key, value) in frame {
+                    if key != "type" {
+                        document.insert(key, value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn finish(self) -> serde_json::Value {
+        self.0
+            .map_or(serde_json::Value::Null, serde_json::Value::Object)
+    }
+}
+
 impl Wire for Echo {
     type Op = Completion;
     type Payload = Encoded;
     type Frame = WireFrame;
     type Decoder<'id> = EchoDecoder<'id>;
+    type Reassembler = EchoDocument;
 
     fn describe(&self) -> Descriptor<'_> {
-        Descriptor::new("echo").model("echo-1")
+        Descriptor::new("echo").model("echo-1").replay(self)
     }
 
     fn encode(&self, request: CompletionRequest, _mode: Mode) -> Result<Encoded, EncodeError> {
@@ -259,66 +364,12 @@ impl Wire for Echo {
 }
 
 fn prompt() -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: vec![crate::message::Message::user("say hi")],
-        documents: Vec::new(),
-        tools: Vec::new(),
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    CompletionRequest::new("say hi")
 }
 
 // ── the property the model exists for ───────────────────────────────────
 
 const UNARY_BODY: &str = r#"{"type":"message","text":"hi there","usage":{"output_tokens":3}}"#;
-const STREAM_BODY: &str = concat!(
-    "data: {\"type\":\"delta\",\"text\":\"hi \"}\n\n",
-    "data: {\"type\":\"delta\",\"text\":\"there\"}\n\n",
-    "data: {\"type\":\"stop\",\"usage\":{\"output_tokens\":3}}\n\n",
-);
-
-#[tokio::test]
-async fn a_unary_reply_and_a_streamed_reply_fold_to_the_same_response() {
-    let unary = Model::new(Echo::unary(), RecordingHttpClient::new(UNARY_BODY));
-    let buffered = unary.call(prompt()).await.expect("the reply decodes");
-
-    let streaming = Model::new(
-        Echo::streaming(),
-        MockStreamingClient {
-            sse_bytes: Bytes::from_static(STREAM_BODY.as_bytes()),
-        },
-    );
-    let mut response = streaming.stream(prompt()).expect("the stream opens");
-    while response.next().await.is_some() {}
-    let streamed = response.finish().await.expect("the stream ended");
-
-    assert_eq!(buffered.choice, streamed.choice);
-    assert_eq!(buffered.usage, streamed.usage);
-    assert_eq!(buffered.model, streamed.model);
-    assert_eq!(buffered.finish_reason(), streamed.finish_reason());
-    assert_eq!(
-        buffered.choice.first().and_then(|block| match block {
-            crate::message::AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        }),
-        Some("hi there")
-    );
-}
-
-#[tokio::test]
-async fn a_unary_reply_carries_its_body_as_raw() {
-    let bound = Model::new(Echo::unary(), RecordingHttpClient::new(UNARY_BODY));
-    let response = bound.call(prompt()).await.expect("the reply decodes");
-    assert_eq!(
-        response.raw.pointer("/text").and_then(|text| text.as_str()),
-        Some("hi there")
-    );
-}
 
 // ── the non-success funnel: four cells ──────────────────────────────────
 
@@ -354,142 +405,7 @@ async fn a_relaxed_wire_still_reads_a_unary_reply_that_names_no_content_type() {
     assert_eq!(text_of(&response), Some("hi there"));
 }
 
-/// Projection walks framed payloads, not the raw body: an SSE-framed unary
-/// reply's facts are JSON *inside* `data:` lines, so projecting the body
-/// would hand every projector a document it cannot parse and the trace
-/// would silently lose its usage and verdict.
-#[tokio::test]
-async fn a_unary_reply_projects_the_same_facts_a_streamed_one_does() {
-    let body = format!("data: {UNARY_BODY}\n\n");
-    let (unary_log, unary_context) = observed();
-    let http = SequencedHttpClient::new([MockHttpResponse::success_typed(
-        body.clone(),
-        "text/event-stream",
-    )]);
-    call(&Echo::sse_unary(), &http, prompt(), Some(unary_context))
-        .await
-        .expect("the reply decodes");
-
-    let (streamed_log, streamed_context) = observed();
-    let http = MockStreamingClient {
-        sse_bytes: Bytes::from(body),
-    };
-    let frames = stream(&Echo::streaming(), &http, prompt(), Some(streamed_context))
-        .expect("the stream opens");
-    let _: Vec<_> = frames.collect().await;
-
-    let facts = |log: &ObservationLog| {
-        events(log)
-            .into_iter()
-            .filter(|event| event != "finished")
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(facts(&unary_log), facts(&streamed_log));
-    assert!(
-        facts(&unary_log).contains(&"usage".to_owned()),
-        "the projection ran: {:?}",
-        facts(&unary_log)
-    );
-}
-
-/// A transport that reports the reply as an error, with a request-id header.
-#[tokio::test]
-async fn a_transport_reported_failure_preserves_status_headers_and_request_id() {
-    let mut headers = http::HeaderMap::new();
-    headers.insert("retry-after", http::HeaderValue::from_static("7"));
-    headers.insert("request-id", http::HeaderValue::from_static("req_1"));
-    let http = RecordingHttpClient::with_error_headers(
-        http::StatusCode::TOO_MANY_REQUESTS,
-        "slow down",
-        headers,
-    );
-    let error = call(&Echo::unary(), &http, prompt(), None)
-        .await
-        .expect_err("a 429 fails the call");
-    assert_eq!(
-        error.provider_response_status(),
-        Some(http::StatusCode::TOO_MANY_REQUESTS)
-    );
-    assert_eq!(error.provider_request_id(), Some("req_1"));
-    assert_eq!(
-        error
-            .provider_response_headers()
-            .and_then(|headers| headers.get("retry-after"))
-            .and_then(|value| value.to_str().ok()),
-        Some("7")
-    );
-}
-
-/// A transport that hands the non-success *response* back instead.
-#[tokio::test]
-async fn a_non_success_response_preserves_status_headers_and_request_id() {
-    let mut headers = http::HeaderMap::new();
-    headers.insert("retry-after", http::HeaderValue::from_static("11"));
-    headers.insert("request-id", http::HeaderValue::from_static("req_2"));
-    let http = SequencedHttpClient::new([MockHttpResponse::error_with_headers(
-        http::StatusCode::SERVICE_UNAVAILABLE,
-        "down",
-        headers,
-    )]);
-    let error = call(&Echo::unary(), &http, prompt(), None)
-        .await
-        .expect_err("a 503 fails the call");
-    assert_eq!(
-        error.provider_response_status(),
-        Some(http::StatusCode::SERVICE_UNAVAILABLE)
-    );
-    assert_eq!(error.provider_request_id(), Some("req_2"));
-    assert_eq!(
-        error
-            .provider_response_headers()
-            .and_then(|headers| headers.get("retry-after"))
-            .and_then(|value| value.to_str().ok()),
-        Some("11")
-    );
-}
-
-#[tokio::test]
-async fn an_undecodable_body_fails_the_call_as_a_json_error() {
-    let http = RecordingHttpClient::new("not json at all");
-    let error = call(&Echo::unary(), &http, prompt(), None)
-        .await
-        .expect_err("a non-JSON reply fails the call");
-    assert!(
-        matches!(error, ProviderError::Json(_)),
-        "expected a JSON error, got {error:?}"
-    );
-}
-
-/// A reply that framed to nothing never reached the provider's end: it is
-/// truncated, never an empty answer.
-#[tokio::test]
-async fn a_reply_with_no_frames_is_truncated() {
-    let http = RecordingHttpClient::new("");
-    let error = call(&Echo::unary(), &http, prompt(), None)
-        .await
-        .expect_err("an empty body is not an answer");
-    assert!(matches!(error, ProviderError::Truncated), "{error:?}");
-}
-
 // ── streaming semantics ─────────────────────────────────────────────────
-
-#[tokio::test]
-async fn a_connect_failure_is_the_streams_only_item() {
-    let http = HttpErrorStreamingClient::new(http::StatusCode::UNAUTHORIZED, "{\"error\":\"no\"}");
-    let frames = stream(&Echo::streaming(), &http, prompt(), None)
-        .expect("opening the stream is not an encode error");
-    let items: Vec<_> = frames.collect().await;
-    assert_eq!(items.len(), 1);
-    let error = items
-        .into_iter()
-        .next()
-        .expect("one item")
-        .expect_err("the item is the connect failure");
-    assert_eq!(
-        error.provider_response_status(),
-        Some(http::StatusCode::UNAUTHORIZED)
-    );
-}
 
 /// A streaming transport that hands the non-success *response* back as `Ok`:
 /// the driver rejects it on status, and the reply's status, headers, request
@@ -532,72 +448,92 @@ async fn a_non_success_streaming_response_is_rejected_as_the_streams_only_item()
     );
 }
 
-#[tokio::test]
-async fn a_transport_failure_mid_stream_ends_it_without_a_terminal() {
-    let http = SequencedStreamingHttpClient::new(vec![
-        Ok(Bytes::from_static(
-            b"data: {\"type\":\"delta\",\"text\":\"hi\"}\n\n",
-        )),
-        Err(crate::http_client::Error::StreamEnded),
-    ]);
-    let mut frames = stream(&Echo::streaming(), &http, prompt(), None).expect("the stream opens");
-    let items: Vec<_> = (&mut frames).collect().await;
-    assert!(
-        items.last().is_some_and(|item| item.is_err()),
-        "the transport error is the last item"
-    );
-    assert!(
-        frames.finish().await.is_err(),
-        "truncation never fabricates an end"
-    );
+/// A transport whose reply sends `frames`, then fails.
+#[derive(Clone)]
+struct Broken(Vec<&'static str>);
+
+impl Transport<Echo> for Broken {
+    fn send(&self, _payload: Encoded, _exchange: super::Exchange) -> super::Opening<WireFrame> {
+        let frames = self
+            .0
+            .iter()
+            .map(|frame| Ok(WireFrame::Text((*frame).to_owned())))
+            .chain([Err(ProviderError::Response(
+                "the connection dropped".to_owned(),
+            ))])
+            .collect::<Vec<_>>();
+        super::Opening::ready(super::Opened::new(futures::stream::iter(frames)))
+    }
 }
 
+/// A streamed reply's `raw` is what its reassembler rebuilt: the whole
+/// document at the provider's end, and the document so far on a stream cut
+/// short or failed by its transport, which `partial()` then carries.
 #[tokio::test]
-async fn a_corrupt_frame_ends_the_reply() {
-    let body = concat!(
-        "data: {\"type\":\"delta\",\"text\":\"hi\"}\n\n",
-        "data: {\"type\":\"delta\"}\n\n",
-        "data: {\"type\":\"stop\",\"usage\":{\"output_tokens\":1}}\n\n",
-    );
-    let http = MockStreamingClient {
-        sse_bytes: Bytes::from(body),
+async fn a_streamed_reply_records_its_document_whole_cut_or_failed() {
+    let delta = r#"{"type":"delta","text":"hi "}"#;
+    let whole = MockStreamingClient {
+        sse_bytes: Bytes::from(format!(
+            "data: {delta}\n\ndata: {{\"type\":\"delta\",\"text\":\"there\"}}\n\n\
+             data: {{\"type\":\"stop\",\"usage\":{{\"output_tokens\":3}}}}\n\n"
+        )),
     };
-    let frames = stream(&Echo::streaming(), &http, prompt(), None).expect("the stream opens");
-    let items: Vec<_> = frames.collect().await;
-    assert_eq!(items.iter().filter(|item| item.is_err()).count(), 1);
+    let response = Model::new(Echo::streaming(), whole)
+        .stream(prompt())
+        .expect("the stream opens")
+        .finish()
+        .await
+        .expect("the reply ends");
+    assert_eq!(
+        response.raw,
+        serde_json::from_str::<serde_json::Value>(UNARY_BODY).expect("the unary body is JSON"),
+        "the stream rebuilds the unary document"
+    );
+
+    let so_far = json!({"type": "message", "text": "hi "});
+    let cut = MockStreamingClient {
+        sse_bytes: Bytes::from(format!("data: {delta}\n\n")),
+    };
+    let mut stream = Model::new(Echo::streaming(), cut)
+        .stream(prompt())
+        .expect("the stream opens");
+    while stream.next().await.is_some() {}
+    assert_eq!(
+        stream.partial().raw,
+        so_far,
+        "a cut stream keeps the document so far"
+    );
+
+    let mut stream = Model::new(Echo::streaming(), Broken(vec![delta]))
+        .stream(prompt())
+        .expect("the stream opens");
+    let items: Vec<_> = (&mut stream).collect().await;
     assert!(
         items.last().is_some_and(Result::is_err),
-        "nothing follows the corrupt frame: {items:?}"
+        "the transport failure ends the stream: {items:?}"
+    );
+    assert_eq!(
+        stream.partial().raw,
+        so_far,
+        "a failed stream keeps the document so far"
     );
 }
 
+/// A caller that stops polling leaves the reassembler unfinished, so the
+/// reply records no `raw`.
 #[tokio::test]
-async fn a_heartbeat_frame_never_reaches_the_decoder() {
-    let body = concat!(
-        ": keep-alive\n\n",
-        "data:  \n\n",
-        "data: {\"type\":\"stop\",\"usage\":{\"output_tokens\":0}}\n\n",
-    );
+async fn a_stream_the_caller_stopped_polling_records_no_raw() {
     let http = MockStreamingClient {
-        sse_bytes: Bytes::from(body),
+        sse_bytes: Bytes::from_static(
+            b"data: {\"type\":\"delta\",\"text\":\"hi \"}\n\n\
+              data: {\"type\":\"delta\",\"text\":\"there\"}\n\n",
+        ),
     };
-    let mut frames = stream(&Echo::streaming(), &http, prompt(), None).expect("the stream opens");
-    let items: Vec<_> = (&mut frames).collect().await;
-    assert!(items.is_empty(), "only the end is a frame: {items:?}");
-    frames.finish().await.expect("the end still ends the reply");
-}
-
-#[tokio::test]
-async fn a_streams_terminal_carries_the_transport_request_id() {
-    let http = MockStreamingClient {
-        sse_bytes: Bytes::from_static(STREAM_BODY.as_bytes()),
-    };
-    // `MockStreamingClient` reports no request-id header, so a wire that
-    // names one still yields `None` rather than failing.
-    let mut frames = stream(&Echo::streaming(), &http, prompt(), None).expect("the stream opens");
-    while frames.next().await.is_some() {}
-    let response = frames.finish().await.expect("the stream ended");
-    assert_eq!(response.provider_request_id, None);
+    let mut stream = Model::new(Echo::streaming(), http)
+        .stream(prompt())
+        .expect("the stream opens");
+    let _first = stream.next().await;
+    assert!(stream.partial().raw.is_null());
 }
 
 // ── observation ────────────────────────────────────────────────────────
@@ -626,99 +562,45 @@ fn events(log: &ObservationLog) -> Vec<String> {
         .collect()
 }
 
+/// A tool call whose input is not JSON never fails the reply: the call is
+/// kept with its raw text, in both modes.
 #[tokio::test]
-async fn a_streams_observation_facts_arrive_in_the_old_order() {
-    let (log, context) = observed();
-    let http = MockStreamingClient {
-        sse_bytes: Bytes::from_static(STREAM_BODY.as_bytes()),
-    };
-    let frames =
-        stream(&Echo::streaming(), &http, prompt(), Some(context)).expect("the stream opens");
-    let _: Vec<_> = frames.collect().await;
-    assert_eq!(
-        events(&log),
-        vec![
-            "started", "response",
-            // Each frame's payload is projected before it is classified.
-            "provider", "provider", "usage", "provider", "finished",
-        ]
-    );
-}
-
-#[tokio::test]
-async fn a_unary_call_closes_its_attempt_as_decoded() {
-    let (log, context) = observed();
-    let http = RecordingHttpClient::new(UNARY_BODY);
-    call(&Echo::unary(), &http, prompt(), Some(context))
-        .await
-        .expect("the reply decodes");
-    assert_eq!(
-        events(&log),
-        vec!["started", "response", "usage", "provider", "finished"]
-    );
-}
-
-/// How an attempt ended, when it did.
-fn ending(log: &ObservationLog) -> Option<AdapterEvent> {
-    log.trace()
-        .observations
-        .iter()
-        .find_map(|observation| match &observation.action {
-            crate::observe::Action::Adapter { observation }
-                if matches!(observation.event, AdapterEvent::Finished { .. }) =>
-            {
-                Some(observation.event.clone())
-            }
-            _ => None,
-        })
-}
-
-/// A malformed complete tool input is a decode defect that ends the reply,
-/// so the attempt ends as a decode error in both modes.
-#[tokio::test]
-async fn a_malformed_tool_input_ends_the_attempt_as_a_decode_error() {
-    let decode_error = AdapterEvent::Finished {
-        ending: crate::observe::AdapterEnding::Error {
-            boundary: crate::observe::AdapterErrorBoundary::Decode,
-            kind: "response".into(),
-            status: None,
-            retryable: false,
-        },
-    };
-
-    let (log, context) = observed();
+async fn a_malformed_tool_input_is_kept_with_its_raw_text() {
     let http = RecordingHttpClient::new(
         r#"{"type":"tool","name":"add","arguments":"{not json","usage":{"output_tokens":1}}"#,
     );
-    let error = call(&Echo::unary(), &http, prompt(), Some(context))
+    let response = call(&Echo::unary(), &http, prompt(), None)
         .await
-        .expect_err("the defect fails a whole reply");
-    assert!(
-        matches!(error, ProviderError::MalformedToolInput(_)),
-        "{error:?}"
+        .expect("a malformed call does not fail the reply");
+    let call_of = |response: &crate::completion::CompletionResponse| {
+        response
+            .tool_calls()
+            .map(|call| {
+                (
+                    call.function.arguments_value(),
+                    call.function.invalid_arguments.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        call_of(&response),
+        [(serde_json::json!({}), Some("{not json".to_owned()))]
     );
-    assert_eq!(ending(&log), Some(decode_error.clone()));
 
-    let (log, context) = observed();
     let http = MockStreamingClient {
         sse_bytes: Bytes::from_static(
             b"data: {\"type\":\"tool\",\"name\":\"add\",\"arguments\":\"{not json\"}\n\n\
               data: {\"type\":\"stop\",\"usage\":{\"output_tokens\":1}}\n\n",
         ),
     };
-    let items: Vec<_> = Model::new(Echo::streaming(), http)
-        .stream_observed(prompt(), context)
+    let streamed = Model::new(Echo::streaming(), http)
+        .stream(prompt())
         .expect("the stream opens")
-        .collect()
-        .await;
-    assert!(
-        matches!(
-            items.last(),
-            Some(Err(ProviderError::MalformedToolInput(_)))
-        ),
-        "the defect ends the stream: {items:?}"
-    );
-    assert_eq!(ending(&log), Some(decode_error));
+        .finish()
+        .await
+        .expect("a malformed call does not fail the stream");
+    assert_eq!(call_of(&streamed), call_of(&response));
 }
 
 #[tokio::test]
@@ -733,326 +615,125 @@ async fn a_failed_unary_call_projects_the_reply_it_failed_on() {
         .expect_err("a 400 fails the call");
     let events = events(&log);
     assert!(
-        events.contains(&"usage".to_owned()),
+        events.contains(&"provider".to_owned()),
         "the failed reply's facts are still projected: {events:?}"
     );
     assert_eq!(events.last().map(String::as_str), Some("finished"));
 }
 
+/// The driver observes a reply's usage once, when it ends, from the usage
+/// the decoder normalized into its end: unary or streamed, it is the
+/// response's usage, with no invented total.
+#[tokio::test]
+async fn a_reply_observes_its_finish_usage_once() {
+    let streamed = MockStreamingClient {
+        sse_bytes: Bytes::from_static(
+            b"data: {\"type\":\"delta\",\"text\":\"hi\"}\n\n\
+              data: {\"type\":\"stop\",\"usage\":{\"output_tokens\":3}}\n\n",
+        ),
+    };
+    for (observed, usage) in [
+        crate::driver::tests::observed_usage(
+            Echo::unary(),
+            RecordingHttpClient::new(UNARY_BODY),
+            Mode::Unary,
+        )
+        .await,
+        crate::driver::tests::observed_usage(Echo::streaming(), streamed, Mode::Streaming).await,
+    ] {
+        let expected = crate::observe::AdapterUsage {
+            output_tokens: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(observed, std::slice::from_ref(&expected));
+        assert_eq!(expected, crate::observe::AdapterUsage::from(&usage));
+    }
+}
+
+/// A stream that carries usage and then fails has no end, so it observes
+/// no usage, and its attempt closes on the failure, not as `Terminal`.
+/// Before usage was observed from the end, the raw-bytes projector reported
+/// the failing stream's usage frame.
+#[tokio::test]
+async fn a_failed_stream_observes_no_usage() {
+    use crate::observe::{Action, AdapterEnding, AdapterEvent};
+    // Each frame carries usage the old projector would have reported.
+    let usage_frame =
+        "data: {\"type\":\"delta\",\"text\":\"hi\",\"usage\":{\"output_tokens\":3}}\n\n";
+    let in_band =
+        format!("{usage_frame}data: {{\"type\":\"error\",\"message\":\"overloaded\"}}\n\n");
+    for (sse, ended) in [
+        (
+            in_band,
+            (|ending: &AdapterEnding| matches!(ending, AdapterEnding::Error { .. }))
+                as fn(&AdapterEnding) -> bool,
+        ),
+        (usage_frame.to_owned(), |ending| {
+            matches!(ending, AdapterEnding::Eof { after: 1 })
+        }),
+    ] {
+        let (log, context) = observed();
+        let http = MockStreamingClient {
+            sse_bytes: Bytes::from(sse),
+        };
+        let result = match Model::new(Echo::streaming(), http).stream_observed(prompt(), context) {
+            Ok(stream) => stream.finish().await,
+            Err(error) => Err(error),
+        };
+        assert!(result.is_err(), "the stream fails");
+        let adapter: Vec<AdapterEvent> = log
+            .trace()
+            .observations
+            .iter()
+            .filter_map(|observation| match &observation.action {
+                Action::Adapter { observation } => Some(observation.event.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !adapter
+                .iter()
+                .any(|event| matches!(event, AdapterEvent::Usage { .. })),
+            "a failed stream observes no usage: {adapter:?}"
+        );
+        let endings: Vec<&AdapterEnding> = adapter
+            .iter()
+            .filter_map(|event| match event {
+                AdapterEvent::Finished { ending } => Some(ending),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            matches!(endings.as_slice(), [ending] if ended(ending)),
+            "the attempt closes once, on the failure: {endings:?}"
+        );
+    }
+}
+
 // ── paging ─────────────────────────────────────────────────────────────
 
-/// A model-listing wire whose first reply names a second page.
-#[derive(Clone, Debug, PartialEq)]
-struct Catalogue;
-
-#[derive(Default)]
-struct CatalogueDecoder;
-
-#[derive(serde::Deserialize)]
-struct Page {
-    data: Vec<String>,
-    #[serde(default)]
-    next: Option<String>,
-}
-
-impl<'id> Decoder<'id, ModelListing> for CatalogueDecoder {
-    type Event = Page;
-
-    fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
-        match serde_json::from_str(&frame.as_str()) {
-            Ok(page) => WireEvent::Known(page),
-            Err(error) => WireEvent::Corrupt(error),
-        }
-    }
-
-    fn decode(&mut self, page: Page, out: Out<'id, ModelListing>) -> Result<Flow, ProviderError> {
-        Ok(out.end(ModelPage {
-            models: ModelList::new(page.data.into_iter().map(ModelInfo::from_id).collect()),
-            next: page.next,
-        }))
-    }
-}
-
-impl Wire for Catalogue {
-    type Op = ModelListing;
-    type Payload = Encoded;
-    type Frame = WireFrame;
-    type Decoder<'id> = CatalogueDecoder;
-
-    fn describe(&self) -> Descriptor<'_> {
-        Descriptor::new("echo")
-    }
-
-    fn encode(&self, cursor: Option<String>, _mode: Mode) -> Result<Encoded, EncodeError> {
-        let uri = match cursor {
-            Some(cursor) => format!("https://echo.invalid/v1/models?after={cursor}"),
-            None => "https://echo.invalid/v1/models".to_owned(),
-        };
-        let request = http::Request::get(uri).body(Body::empty())?;
-        Ok(Encoded::new(request, Framing::Whole))
-    }
-
-    fn decoder<'id>(&self) -> Self::Decoder<'id> {
-        CatalogueDecoder
-    }
-}
-
-#[tokio::test]
-async fn a_paged_listing_follows_every_continuation() {
-    let http = SequencedHttpClient::new([
-        MockHttpResponse::success(r#"{"data":["a","b"],"next":"b"}"#),
-        MockHttpResponse::success(r#"{"data":["c"]}"#),
-    ]);
-    let bound = Model::new(Catalogue, http.clone());
-    let models = bound.list().await.expect("both pages decode");
-    assert_eq!(
-        models
-            .iter()
-            .map(|model| model.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a", "b", "c"]
-    );
-    let paths: Vec<_> = http
-        .requests()
-        .into_iter()
-        .map(|request| request.uri)
-        .collect();
-    assert_eq!(
-        paths,
-        vec![
-            "https://echo.invalid/v1/models".to_owned(),
-            "https://echo.invalid/v1/models?after=b".to_owned(),
-        ]
-    );
-}
-
-/// One call reads one page, whatever cursor it names.
-#[tokio::test]
-async fn a_listing_call_reads_one_page() {
-    let http = SequencedHttpClient::new([MockHttpResponse::success(
-        r#"{"data":["a","b"],"next":"b"}"#,
-    )]);
-    let page = Model::new(Catalogue, http.clone())
-        .call(None)
-        .await
-        .expect("the page decodes");
-    assert_eq!(page.models.len(), 2);
-    assert_eq!(page.next.as_deref(), Some("b"));
-    assert_eq!(http.requests().len(), 1);
-}
-
-#[tokio::test]
-async fn a_listing_that_repeats_its_cursor_stops_after_the_repeated_page() {
-    // The second page names the cursor that fetched it, so the next request
-    // would be identical to the one just answered (rig#2334).
-    let http = SequencedHttpClient::new([
-        MockHttpResponse::success(r#"{"data":["a"],"next":"b"}"#),
-        MockHttpResponse::success(r#"{"data":["b"],"next":"b"}"#),
-        MockHttpResponse::success(r#"{"data":["never"]}"#),
-    ]);
-    let bound = Model::new(Catalogue, http.clone());
-    let models = bound.list().await.expect("the fetched pages decode");
-    assert_eq!(
-        models
-            .iter()
-            .map(|model| model.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a", "b"]
-    );
-    assert_eq!(
-        http.requests().len(),
-        2,
-        "the repeated cursor is not re-sent"
-    );
-}
-
-#[tokio::test]
-async fn a_listing_whose_cursor_keeps_changing_stops_at_the_page_ceiling() {
-    let pages = (0..super::MAX_CONTINUATION_PAGES + 5).map(|page| {
-        MockHttpResponse::success(format!(r#"{{"data":["m{page}"],"next":"c{}"}}"#, page + 1))
-    });
-    let http = SequencedHttpClient::new(pages);
-    let bound = Model::new(Catalogue, http.clone());
-    let models = bound.list().await.expect("the fetched pages decode");
-    assert_eq!(models.len(), super::MAX_CONTINUATION_PAGES);
-    assert_eq!(http.requests().len(), super::MAX_CONTINUATION_PAGES);
-}
-
-/// Every warning a body emits, by message.
-fn warnings_of(body: impl std::future::Future<Output = ()>) -> Vec<String> {
-    #[derive(Clone, Default)]
-    struct Warnings(Arc<std::sync::Mutex<Vec<String>>>);
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            if *event.metadata().level() == tracing::Level::WARN {
-                let mut fields = Vec::new();
-                event.record(&mut Visit(&mut fields));
-                if let Ok(mut warnings) = self.0.lock() {
-                    warnings.extend(
-                        fields
-                            .into_iter()
-                            .filter(|(name, _)| name == "message")
-                            .map(|(_, message)| message),
-                    );
-                }
-            }
-        }
-    }
-    use tracing_subscriber::layer::SubscriberExt;
-    let warnings = Warnings::default();
-    let subscriber = tracing_subscriber::registry().with(warnings.clone());
-    let _guard = tracing::subscriber::set_default(subscriber);
-    futures::executor::block_on(body);
-    warnings
-        .0
-        .lock()
-        .map(|warnings| warnings.clone())
-        .unwrap_or_default()
-}
-
-/// A repeated cursor stops after the repeated page and a cursor that keeps
-/// changing stops at the ceiling, each with its warning.
-#[test]
-fn a_listing_warns_when_a_cursor_guard_stops_it() {
-    let http = SequencedHttpClient::new([
-        MockHttpResponse::success(r#"{"data":["a"],"next":"b"}"#),
-        MockHttpResponse::success(r#"{"data":["b"],"next":"b"}"#),
-    ]);
-    let warnings = warnings_of(async {
-        let models = Model::new(Catalogue, http.clone())
-            .list()
-            .await
-            .expect("the listing decodes");
-        assert_eq!(models.len(), 2, "the repeated page is the last");
-    });
-    assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.contains("repeated its pagination cursor")),
-        "{warnings:?}"
-    );
-
-    let pages = (0..super::MAX_CONTINUATION_PAGES + 5).map(|page| {
-        MockHttpResponse::success(format!(r#"{{"data":["m{page}"],"next":"c{}"}}"#, page + 1))
-    });
-    let http = SequencedHttpClient::new(pages);
-    let warnings = warnings_of(async {
-        Model::new(Catalogue, http.clone())
-            .list()
-            .await
-            .expect("the listing decodes");
-    });
-    assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.contains("hit its page ceiling")),
-        "{warnings:?}"
-    );
-}
-
-/// An embedding reply over HTTP streams no events, and finishes to what a
-/// call folds.
-#[tokio::test]
-async fn a_streamed_embedding_finishes_to_the_call() {
-    const REPLY: &str = r#"{"object":"list","model":"text-embedding-3-small","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2]},{"object":"embedding","index":1,"embedding":[0.3,0.4]}],"usage":{"prompt_tokens":4,"total_tokens":4}}"#;
-    let wire = crate::providers::openai::wire::OpenAIConfig::new("sk-test")
-        .embedding("text-embedding-3-small", None);
-    let texts = || vec!["a".to_owned(), "b".to_owned()];
-    let reply = || SequencedHttpClient::new([MockHttpResponse::success(REPLY)]);
-
-    let called = Model::new(wire.clone(), reply())
-        .call(texts())
-        .await
-        .expect("the reply decodes");
-    let mut stream = Model::new(wire, reply())
-        .stream(texts())
-        .expect("the embedding opens");
-    let mut events = Vec::new();
-    while let Some(event) = stream.next().await {
-        events.push(event.expect("the reply decodes"));
-    }
-    assert!(events.is_empty(), "the reply's end is the response");
-    let streamed = stream.finish().await.expect("the reply folds");
-    assert_eq!(
-        serde_json::to_value(&streamed).expect("json"),
-        serde_json::to_value(&called).expect("json")
-    );
-    assert_eq!(
-        streamed
-            .embeddings
-            .iter()
-            .map(|embedding| embedding.document.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a", "b"]
-    );
-}
-
 // ── telemetry ──────────────────────────────────────────────────────────
-
-/// A completion's span is named for the mode the call runs in.
-#[test]
-fn the_completion_operation_names_its_span_by_mode() {
-    use tracing::subscriber::with_default;
-    use tracing_subscriber::layer::SubscriberExt;
-
-    let recorded = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
-    let subscriber = tracing_subscriber::registry().with(RecordFields {
-        recorded: recorded.clone(),
-    });
-    with_default(subscriber, || {
-        let unary = Model::new(Echo::unary(), RecordingHttpClient::new(UNARY_BODY));
-        futures::executor::block_on(unary.call(prompt())).expect("the reply decodes");
-        let streaming = Model::new(
-            Echo::streaming(),
-            MockStreamingClient {
-                sse_bytes: Bytes::from_static(STREAM_BODY.as_bytes()),
-            },
-        );
-        let stream = streaming.stream(prompt()).expect("the stream opens");
-        futures::executor::block_on(stream.collect::<Vec<_>>());
-    });
-    let names: Vec<_> = recorded
-        .lock()
-        .expect("no panic held the lock")
-        .iter()
-        .filter(|(field, _)| field == "gen_ai.operation.name")
-        .map(|(_, value)| value.clone())
-        .collect();
-    assert_eq!(names, vec!["chat", "chat_streaming"]);
-}
 
 #[tokio::test]
 async fn the_driver_records_the_folded_responses_metadata() {
     use tracing::subscriber::with_default;
-    use tracing_subscriber::layer::SubscriberExt;
 
-    let recorded = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
-    let layer = RecordFields {
-        recorded: recorded.clone(),
-    };
-    let subscriber = tracing_subscriber::registry().with(layer);
+    let capture = TraceCapture::default();
     let bound = Model::new(Echo::unary(), RecordingHttpClient::new(UNARY_BODY));
-    let response = with_default(subscriber, || {
+    let response = with_default(capture.subscriber(), || {
         futures::executor::block_on(bound.call(prompt()))
     })
     .expect("the reply decodes");
-    assert_eq!(response.model.as_deref(), Some("echo-1"));
-    let recorded = recorded.lock().expect("no panic held the lock").clone();
+    assert_eq!(response.model(), Some("echo-1"));
     assert!(
-        recorded
-            .iter()
-            .any(|(field, value)| field == "gen_ai.response.model" && value == "echo-1"),
-        "expected the response model on the span: {recorded:?}"
+        capture
+            .values_of("gen_ai.response.model")
+            .contains(&json!("echo-1")),
+        "expected the response model on the span"
     );
     assert!(
-        recorded
-            .iter()
-            .any(|(field, _)| field == "gen_ai.usage.output_tokens"),
-        "expected usage on the span: {recorded:?}"
+        !capture.values_of("gen_ai.usage.output_tokens").is_empty(),
+        "expected usage on the span"
     );
 }
 
@@ -1061,111 +742,27 @@ async fn the_driver_records_the_folded_responses_metadata() {
 #[test]
 fn a_streamed_embedding_records_its_response_on_the_span() {
     use tracing::subscriber::with_default;
-    use tracing_subscriber::layer::SubscriberExt;
 
     const REPLY: &str = r#"{"object":"list","model":"text-embedding-3-small","data":[{"object":"embedding","index":0,"embedding":[0.1]}],"usage":{"prompt_tokens":2,"total_tokens":2}}"#;
-    let recorded = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
-    let layer = RecordFields {
-        recorded: recorded.clone(),
-    };
-    let subscriber = tracing_subscriber::registry().with(layer);
+    let capture = TraceCapture::default();
     let wire = crate::providers::openai::wire::OpenAIConfig::new("sk-test")
         .embedding("text-embedding-3-small", None);
     let model = Model::new(
         wire,
         SequencedHttpClient::new([MockHttpResponse::success(REPLY)]),
     );
-    with_default(subscriber, || {
+    with_default(capture.subscriber(), || {
         let stream = model
             .stream(vec!["a".to_owned()])
             .expect("the embedding opens");
         futures::executor::block_on(stream.finish()).expect("the reply folds")
     });
-    let recorded = recorded.lock().expect("no panic held the lock").clone();
     assert!(
-        recorded
-            .iter()
-            .any(|(field, value)| field == "gen_ai.response.model"
-                && value == "text-embedding-3-small"),
-        "expected the response model on the span: {recorded:?}"
+        capture
+            .values_of("gen_ai.response.model")
+            .contains(&json!("text-embedding-3-small")),
+        "expected the response model on the span"
     );
-}
-
-#[tokio::test]
-async fn the_span_names_the_requests_model_override_not_the_wires() {
-    use tracing::subscriber::with_default;
-    use tracing_subscriber::layer::SubscriberExt;
-
-    let recorded = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
-    let layer = RecordFields {
-        recorded: recorded.clone(),
-    };
-    let subscriber = tracing_subscriber::registry().with(layer);
-    let bound = Model::new(Echo::unary(), RecordingHttpClient::new(UNARY_BODY));
-    let request = CompletionRequest {
-        model: Some("echo-override".to_owned()),
-        ..prompt()
-    };
-    with_default(subscriber, || {
-        futures::executor::block_on(bound.call(request))
-    })
-    .expect("the reply decodes");
-    let recorded = recorded.lock().expect("no panic held the lock").clone();
-    assert!(
-        recorded
-            .iter()
-            .any(|(field, value)| field == "gen_ai.request.model" && value == "echo-override"),
-        "expected the override on the span: {recorded:?}"
-    );
-}
-
-/// Captures every field recorded on a span, so the driver's telemetry is
-/// asserted through `tracing` rather than through its own call sites.
-struct RecordFields {
-    recorded: Arc<std::sync::Mutex<Vec<(String, String)>>>,
-}
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecordFields {
-    fn on_new_span(
-        &self,
-        attrs: &tracing::span::Attributes<'_>,
-        _id: &tracing::Id,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        let mut recorded = self
-            .recorded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        attrs.record(&mut Visit(&mut recorded));
-    }
-
-    fn on_record(
-        &self,
-        _id: &tracing::Id,
-        values: &tracing::span::Record<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        let mut recorded = self
-            .recorded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        values.record(&mut Visit(&mut recorded));
-    }
-}
-
-struct Visit<'a>(&'a mut Vec<(String, String)>);
-impl tracing::field::Visit for Visit<'_> {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.0.push((field.name().to_owned(), format!("{value:?}")));
-    }
-
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.0.push((field.name().to_owned(), value.to_owned()));
-    }
-
-    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-        self.0.push((field.name().to_owned(), value.to_string()));
-    }
 }
 
 /// The text a folded response carries, for the assertions below.
@@ -1181,15 +778,39 @@ fn text_of(response: &crate::completion::CompletionResponse) -> Option<&str> {
 /// not be built: the stream's only item.
 #[test]
 fn a_stream_the_driver_cannot_send_is_a_request_failure() {
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     struct Multipart;
+    impl crate::completion::ReplayTarget for Multipart {
+        fn map_options(
+            &self,
+            _request: &crate::completion::CompletionRequest,
+            fields: crate::completion::options::OptionFields<'_>,
+        ) -> crate::completion::options::OptionMap {
+            crate::test_utils::refuse_options(fields)
+        }
+
+        fn api(&self) -> crate::message::Api {
+            crate::message::Api::from_static("echo.chat")
+        }
+        fn provider(&self) -> &str {
+            "echo"
+        }
+        fn model(&self) -> &str {
+            ""
+        }
+
+        fn accepts(&self, _model: &str) -> crate::completion::Accepts {
+            crate::completion::Accepts::ALL
+        }
+    }
     impl Wire for Multipart {
         type Op = Completion;
         type Payload = Encoded;
         type Frame = WireFrame;
         type Decoder<'id> = EchoDecoder<'id>;
+        type Reassembler = EchoDocument;
         fn describe(&self) -> Descriptor<'_> {
-            Descriptor::new("echo")
+            Descriptor::new("echo").replay(self)
         }
         fn encode(&self, _request: CompletionRequest, _mode: Mode) -> Result<Encoded, EncodeError> {
             let request = http::Request::post("https://echo.invalid/a")
@@ -1224,72 +845,3 @@ fn a_stream_the_driver_cannot_send_is_a_request_failure() {
 }
 
 // ── request validation ─────────────────────────────────────────────────
-
-/// An operation that rejects an empty request, over a runtime that counts
-/// the requests it is sent.
-struct Guarded;
-
-impl crate::wire::Operation for Guarded {
-    type Request = String;
-    type Event = std::convert::Infallible;
-    type End = String;
-    type Response = String;
-    type Fold = crate::operation::Whole<Self>;
-    type Emit = crate::wire::Free;
-
-    fn fold(_request: &String, _call: &mut crate::wire::Call<'_>) -> Self::Fold {
-        crate::operation::Whole::new()
-    }
-
-    fn validate(request: &String) -> Result<(), ProviderError> {
-        if request.is_empty() {
-            return Err(ProviderError::request("the request is empty"));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Default)]
-struct CountingRuntime(Arc<std::sync::atomic::AtomicUsize>);
-
-impl Transport<super::Local<Guarded>> for CountingRuntime {
-    fn send(
-        &self,
-        request: String,
-        _exchange: super::Exchange,
-    ) -> super::Opening<super::Step<Guarded>> {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        super::Opening::ready(super::Opened::new(futures::stream::iter([Ok(
-            super::Step::End(request),
-        )])))
-    }
-}
-
-/// A request the operation rejects fails every entry to the driver before
-/// the transport is called; one it accepts is sent.
-#[tokio::test]
-async fn a_request_the_operation_rejects_never_reaches_the_transport() {
-    let runtime = CountingRuntime::default();
-    let model = Model::new(super::Local::<Guarded>::new("guarded"), runtime.clone());
-
-    let error = model
-        .call(String::new())
-        .await
-        .expect_err("the call is rejected");
-    assert_eq!(error.kind(), crate::error::ErrorKind::Request);
-    assert!(
-        model.stream(String::new()).is_err(),
-        "the stream is rejected"
-    );
-    let erased = model.clone().erase();
-    assert!(erased.call(String::new()).await.is_err());
-    assert!(erased.stream(String::new()).is_err());
-    assert_eq!(runtime.0.load(std::sync::atomic::Ordering::SeqCst), 0);
-
-    let response = model
-        .call("hello".to_owned())
-        .await
-        .expect("the call is sent");
-    assert_eq!(response, "hello");
-    assert_eq!(runtime.0.load(std::sync::atomic::Ordering::SeqCst), 1);
-}

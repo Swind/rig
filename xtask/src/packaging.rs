@@ -15,7 +15,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::Command;
 
 use serde_json::Value;
 
@@ -62,11 +61,18 @@ const SIZE_CEILING: u64 = 8 * 1024 * 1024;
 /// with the reason. Code a build script writes into `OUT_DIR` is not on disk
 /// to scan, so the one crate with a build script needs its generated code's
 /// dependency spelled out here.
-const GENERATED_CODE_DEPENDENCIES: &[(&str, &str, &str)] = &[(
-    "rig-gemini-grpc",
-    "tonic-prost",
-    "named by the tonic service code build.rs generates into OUT_DIR",
-)];
+const GENERATED_CODE_DEPENDENCIES: &[(&str, &str, &str)] = &[
+    (
+        "rig-gemini-grpc",
+        "tonic-prost",
+        "named by the tonic service code build.rs generates into OUT_DIR",
+    ),
+    (
+        "rig-gemini-grpc",
+        "prost-types",
+        "names the google.protobuf well-known types the generated messages hold",
+    ),
+];
 
 pub(crate) fn check(workspace: &Path) -> Result<(), String> {
     let metadata = metadata(workspace, &["--no-deps"])?;
@@ -414,20 +420,10 @@ impl Package {
         if build.is_file() {
             sources.push(read(&build)?);
         }
-        let mut stack = vec![self.root.join("src")];
-        while let Some(directory) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&directory) else {
-                continue;
-            };
-            for entry in entries {
-                let path = entry
-                    .map_err(|error| format!("{}: {error}", directory.display()))?
-                    .path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.extension().is_some_and(|extension| extension == "rs") {
-                    sources.push(read(&path)?);
-                }
+        let src = self.root.join("src");
+        if src.is_dir() {
+            for path in crate::support::files_under(&src, Some("rs"))? {
+                sources.push(read(&path)?);
             }
         }
         Ok(sources)
@@ -521,24 +517,8 @@ fn metadata(workspace: &Path, arguments: &[&str]) -> Result<Value, String> {
 }
 
 fn cargo(workspace: &Path, arguments: &[&str]) -> Result<String, String> {
-    let output = Command::new(std::env::var("CARGO").as_deref().unwrap_or("cargo"))
-        .args(arguments)
-        .current_dir(workspace)
-        .output()
-        .map_err(|error| format!("could not run cargo {}: {error}", arguments.join(" ")))?;
-    if !output.status.success() {
-        return Err(format!(
-            "cargo {} failed:\n{}",
-            arguments.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    String::from_utf8(output.stdout).map_err(|error| {
-        format!(
-            "cargo {} produced non-UTF-8 output: {error}",
-            arguments.join(" ")
-        )
-    })
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    crate::support::output(workspace, &cargo, arguments)
 }
 
 #[cfg(test)]

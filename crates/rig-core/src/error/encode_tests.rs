@@ -42,7 +42,7 @@ fn assert_request_building(case: &str, error: &ProviderError) {
     assert!(!error.is_retryable(), "{case}: {error}");
     assert_eq!(error.report().kind, ErrorKind::Request, "{case}: {error}");
     match error {
-        ProviderError::Request(_) => {}
+        ProviderError::Request(_) | ProviderError::UnsupportedOption(_) => {}
         ProviderError::Http(_)
         | ProviderError::Url(_)
         | ProviderError::Json(_)
@@ -52,9 +52,7 @@ fn assert_request_building(case: &str, error: &ProviderError) {
         | ProviderError::InvalidAuthentication(_)
         | ProviderError::CacheExpired { .. }
         | ProviderError::MismatchedDimensions { .. }
-        | ProviderError::MalformedToolInput(_)
         | ProviderError::Truncated
-        | ProviderError::DuplicateCallId(_)
         | ProviderError::Relayed(_) => {
             panic!("{case}: an encode failure must not classify as {error:?}")
         }
@@ -76,6 +74,15 @@ fn every_encode_error_constructor_classifies_as_request_building() {
         ("from http", http.into()),
         ("from boxed", boxed.into()),
         ("from message", message.into()),
+        (
+            "unsupported option",
+            EncodeError::unsupported(crate::completion::UnsupportedOption::new(
+                "seed",
+                "aws_bedrock",
+                "model",
+                "no seed",
+            )),
+        ),
     ];
     for (case, error) in cases {
         let error = ProviderError::from(error);
@@ -94,22 +101,13 @@ fn provider_encode_failures_classify_as_request_building() {
     let gemini = GeminiConfig::new("k").with_base_url(BAD);
     let specific_tool = CompletionRequest::new("hi")
         .tool(ToolDefinition {
-            name: "f".into(),
+            name: crate::message::ToolName::new("f").expect("tool name"),
             description: "d".into(),
             parameters: json!({"type": "object"}),
         })
         .tool_choice(ToolChoice::Specific {
-            function_names: vec!["f".into()],
+            function_names: vec![crate::message::ToolName::new("f").expect("tool name")],
         });
-    let unflattenable_schema = CompletionRequest::new("hi").tool(ToolDefinition {
-        name: "f".into(),
-        description: "d".into(),
-        parameters: json!({
-            "type": "object",
-            "$defs": 5,
-            "properties": {"a": {"$ref": "#/$defs/x"}},
-        }),
-    });
     let cases = [
         (
             "openai chat",
@@ -228,15 +226,6 @@ fn provider_encode_failures_classify_as_request_building() {
             "RequestError: invalid uri character",
         ),
         (
-            "gemini tool schema",
-            failure(
-                GeminiConfig::new("k")
-                    .completion("gemini-2.5-flash")
-                    .encode(unflattenable_schema, Mode::Unary),
-            ),
-            "RequestError: Tool 'f' could not be converted to a schema: $defs must be an object",
-        ),
-        (
             "cohere embed",
             failure(
                 CohereConfig::new("k")
@@ -271,4 +260,21 @@ fn provider_encode_failures_classify_as_request_building() {
         assert_request_building(case, &error);
         assert_eq!(error.to_string(), message, "{case}");
     }
+}
+
+#[test]
+fn an_unsupported_option_is_read_back_from_the_encode_error() {
+    let refusal =
+        crate::completion::UnsupportedOption::new("cache", "deepseek", "deepseek-v4", "no cache");
+    let error = EncodeError::unsupported(refusal.clone());
+    assert_eq!(error.unsupported_option(), Some(&refusal));
+    assert_eq!(EncodeError::request("other").unsupported_option(), None);
+
+    let error = ProviderError::from(error);
+    assert_request_building("unsupported option", &error);
+    assert!(matches!(&error, ProviderError::UnsupportedOption(option) if *option == refusal));
+    assert_eq!(
+        error.to_string(),
+        "RequestError: `cache` is not supported by deepseek model `deepseek-v4`: no cache"
+    );
 }

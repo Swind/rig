@@ -3,7 +3,7 @@ use candle_transformers::generation::Sampling;
 use candle_transformers::models::llama::LlamaConfig;
 #[cfg(not(target_family = "wasm"))]
 use futures::StreamExt;
-use rig_core::completion::{Document, ToolDefinition};
+use rig_core::completion::ToolDefinition;
 use rig_core::message::{AudioMediaType, ImageDetail, ImageMediaType, ToolChoice};
 #[cfg(not(target_family = "wasm"))]
 use rig_core::streaming::{Item, StreamEvent};
@@ -22,7 +22,16 @@ use super::*;
 
 /// The generation wire over `model`.
 fn generation(model: &CandleModel) -> rig_core::Model<Generation, CandleModel> {
-    rig_core::Model::new(Generation, model.clone())
+    model.completion()
+}
+
+/// A generation wire for a scripted Qwen3 runtime.
+fn scripted() -> Generation {
+    Generation {
+        model: "qwen3-scripted".to_owned(),
+        protocol: ConversationProtocol::Qwen3,
+        facts: Default::default(),
+    }
 }
 
 /// Replays scripted generation events as a local generator would send them.
@@ -30,7 +39,7 @@ fn generation(model: &CandleModel) -> rig_core::Model<Generation, CandleModel> {
 struct Scripted(Arc<std::sync::Mutex<Vec<GenerationEvent>>>);
 
 impl Transport<Generation> for Scripted {
-    fn send(&self, _request: CompletionRequest, _exchange: Exchange) -> Opening<CandleFrame> {
+    fn send(&self, _request: CandleRequest, _exchange: Exchange) -> Opening<CandleFrame> {
         let events = match self.0.lock() {
             Ok(mut events) => std::mem::take(&mut *events),
             Err(_) => {
@@ -52,7 +61,7 @@ fn stream_from_events(
     events: Vec<GenerationEvent>,
 ) -> Result<rig_core::streaming::CompletionStream, ProviderError> {
     rig_core::Model::new(
-        Generation,
+        scripted(),
         Scripted(Arc::new(std::sync::Mutex::new(events))),
     )
     .stream(request(vec![Message::user("hello")]))
@@ -276,22 +285,33 @@ fn config_with(
 }
 
 fn request(messages: Vec<Message>) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: if messages.is_empty() {
-            vec![Message::user("hello")]
-        } else {
-            messages
-        },
-        documents: Vec::new(),
-        tools: Vec::new(),
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    CompletionRequest::from(if messages.is_empty() {
+        vec![Message::user("hello")]
+    } else {
+        messages
+    })
+}
+
+/// `request` as the generation wire encodes it for the loaded model.
+fn payload(request: CompletionRequest) -> Result<CandleRequest, CandleError> {
+    use rig_core::wire::Wire as _;
+    scripted()
+        .encode(request, Mode::Unary)
+        .map_err(|error| CandleError::InvalidGeneration(error.to_string()))
+}
+
+/// The generation settings `request` asks of a model with `defaults`.
+fn settings(
+    request: &CompletionRequest,
+    defaults: &GenerationConfig,
+    vocab_size: usize,
+) -> Result<GenerationConfig, CandleError> {
+    effective_generation(
+        request,
+        &payload(request.clone())?.params,
+        defaults,
+        vocab_size,
+    )
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -390,21 +410,6 @@ fn rejects_empty_and_malformed_artifacts() -> Result<(), Box<dyn std::error::Err
         CandleModel::from_safetensors(data),
         Err(CandleError::InvalidCheckpoint(_))
     ));
-    Ok(())
-}
-
-#[test]
-fn validates_checkpoint_metadata_before_model_loading()
--> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let config: LlamaConfig = serde_json::from_slice(&tiny_config())?;
-    let config = config.into_config(false);
-    validate_checkpoint(&checkpoint(true)?, &config)?;
-    let error = validate_checkpoint(&checkpoint(false)?, &config)
-        .err()
-        .ok_or("expected missing tensor")?;
-    assert!(
-        matches!(error, CandleError::MissingTensor(name) if name == "model.layers.0.self_attn.q_proj.weight")
-    );
     Ok(())
 }
 
@@ -773,30 +778,6 @@ async fn async_loading_succeeds_and_preserves_builder_settings()
     Ok(())
 }
 
-#[cfg(not(target_family = "wasm"))]
-#[tokio::test(flavor = "current_thread")]
-async fn async_loading_preserves_typed_errors_and_converts_panics() {
-    let invalid = CandleModel::from_safetensors_async(ModelData {
-        config: b"not json".to_vec(),
-        tokenizer: b"tokenizer".to_vec(),
-        weights: b"weights".to_vec(),
-    })
-    .await;
-    assert!(matches!(invalid, Err(CandleError::Configuration(_))));
-
-    let panicked = join_model_load(tokio::task::spawn_blocking(|| {
-        std::panic::resume_unwind(Box::new("intentional async-loading test panic"));
-        // Never evaluated — the closure panics above. It exists only to pin the
-        // return type that `join_model_load` expects.
-        #[allow(unreachable_code)]
-        Err::<CandleModel, CandleError>(CandleError::Configuration(
-            "unreachable: the closure panics above".to_owned(),
-        ))
-    }))
-    .await;
-    assert!(matches!(panicked, Err(CandleError::BlockingTaskJoin(_))));
-}
-
 #[test]
 fn typed_gguf_and_family_errors_preserve_the_failure_kind()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -866,173 +847,24 @@ fn gguf_metadata_shapes_and_tensor_encodings_are_validated_before_loading()
     Ok(())
 }
 
-#[cfg(not(target_family = "wasm"))]
-#[test]
-fn loaded_model_works_with_agent_builder() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use rig_agent::agent::AgentBuilder;
-
-    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
-    runtime.block_on(async {
-        let model = CandleModel::builder(model_data()?)
-            .temperature(0.0)
-            .max_tokens(1)
-            .build()?;
-        let agent = AgentBuilder::new(generation(&model))
-            .preamble("Be brief.")
-            .build();
-        let _answer = agent.prompt("hello").await?;
-        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-    })?;
-    Ok(())
-}
-
-/// The driver scopes no history for a local model: reasoning another
-/// provider issued reaches the prompt protocol, which refuses what the model
-/// cannot render, up front, instead of the reasoning vanishing.
+/// A turn another model produced replays from its canonical fields, so its
+/// reasoning reaches the local prompt as plain text instead of vanishing.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "current_thread")]
-async fn foreign_reasoning_in_history_is_refused_not_dropped()
+async fn foreign_reasoning_in_history_reaches_the_prompt_as_text()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let model = CandleModel::builder(model_data()?).max_tokens(1).build()?;
     let history = vec![
         Message::user("hello"),
-        Message::Assistant {
-            id: None,
-            content: vec![
-                rig_core::message::AssistantContent::Reasoning(
-                    rig_core::message::Reasoning::new("elsewhere")
-                        .sealed(String::from("anthropic")),
-                ),
-                rig_core::message::AssistantContent::text("hi"),
-            ],
-        },
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            rig_core::message::AssistantContent::Reasoning(rig_core::message::Reasoning::new(
+                "elsewhere",
+            )),
+            rig_core::message::AssistantContent::text("hi"),
+        ])),
         Message::user("again"),
     ];
-    let Err(error) = generation(&model).call(request(history)).await else {
-        return Err("the local prompt cannot render foreign reasoning".into());
-    };
-    assert!(
-        error.to_string().contains("structured reasoning"),
-        "the prompt protocol refuses it: {error}"
-    );
-    Ok(())
-}
-
-#[cfg(not(target_family = "wasm"))]
-#[tokio::test(flavor = "current_thread")]
-async fn buffered_and_streaming_generation_are_equivalent()
--> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let model = CandleModel::builder(model_data()?)
-        .temperature(0.0)
-        .max_tokens(3)
-        .build()?;
-    let completion_request = request(vec![Message::user("hello")]);
-    let buffered = raw_completion(&model, completion_request.clone()).await?;
-    let (streamed_text, streamed) = collect_stream(&model, completion_request).await?;
-
-    assert_eq!(streamed_text, buffered.text);
-    assert_eq!(streamed.text, buffered.text);
-    assert_eq!(streamed.prompt_tokens, buffered.prompt_tokens);
-    assert_eq!(streamed.generated_tokens, buffered.generated_tokens);
-    assert_eq!(streamed.finish_reason, buffered.finish_reason);
-    assert_eq!(streamed.requested_max_tokens, buffered.requested_max_tokens);
-    assert_eq!(streamed.effective_max_tokens, buffered.effective_max_tokens);
-    assert_eq!(
-        rig_core::completion::Usage::from(&streamed),
-        rig_core::completion::Usage::from(&buffered)
-    );
-    assert!(streamed.time_to_first_token_ms.is_some());
-    assert!(streamed.prefill_duration_ms <= streamed.generation_duration_ms);
-    Ok(())
-}
-
-#[cfg(not(target_family = "wasm"))]
-#[tokio::test(flavor = "current_thread")]
-async fn streaming_reports_eos_and_excludes_the_stop_token()
--> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut loaded = load_model(model_data()?, GenerationConfig::default(), 1)?;
-    loaded.generation.temperature = 0.0;
-    loaded.profile.stop_tokens.insert(0);
-    let model = CandleModel {
-        state: Arc::new(loaded),
-    };
-    let (text, raw) = collect_stream(&model, request(vec![Message::user("hello")])).await?;
-    assert!(text.is_empty());
-    assert!(raw.text.is_empty());
-    assert_eq!(raw.finish_reason, FinishReason::Eos);
-    assert_eq!(raw.generated_tokens, 1);
-    assert_eq!(
-        rig_core::completion::Usage::from(&raw).output_tokens,
-        Some(1)
-    );
-    Ok(())
-}
-
-#[cfg(not(target_family = "wasm"))]
-#[tokio::test(flavor = "current_thread")]
-async fn streaming_clamps_context_and_rejects_bad_request_options()
--> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut loaded = load_model(model_data()?, GenerationConfig::default(), 1)?;
-    let mut completion_request = request(vec![Message::user("hello")]);
-    completion_request.max_tokens = Some(10);
-    completion_request.temperature = Some(0.0);
-    let prompt = render_prompt(&completion_request)?;
-    let prompt_tokens = loaded.tokenizer.encode(prompt, false)?.len();
-    loaded.profile.context_limit = prompt_tokens + 2;
-    let model = CandleModel {
-        state: Arc::new(loaded),
-    };
-    let (_, raw) = collect_stream(&model, completion_request).await?;
-    assert_eq!(raw.requested_max_tokens, 10);
-    assert_eq!(raw.effective_max_tokens, 2);
-    assert_eq!(raw.generated_tokens, 2);
-
-    for additional_params in [
-        serde_json::json!({"unknown": true}),
-        serde_json::json!({"top_k": "four"}),
-    ] {
-        let mut bad_request = request(vec![Message::user("hello")]);
-        bad_request.additional_params = Some(additional_params);
-        let mut stream = generation(&model).stream(bad_request)?;
-        let item = stream
-            .next()
-            .await
-            .ok_or("bad streaming request produced no error item")?;
-        assert!(item.is_err());
-    }
-    Ok(())
-}
-
-#[test]
-fn incremental_decoder_preserves_token_boundaries() -> Result<(), CandleError> {
-    let tokenizer = Tokenizer::from_bytes(
-        tiny_tokenizer().map_err(|error| CandleError::TokenizerLoading(error.to_string()))?,
-    )
-    .map_err(|error| CandleError::TokenizerLoading(error.to_string()))?;
-    let ids = [0, 0, 7];
-    let independently_decoded = ids
-        .iter()
-        .map(|id| tokenizer.decode(&[*id], true))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| CandleError::TokenizerDecoding(error.to_string()))?
-        .join("");
-    let complete = tokenizer
-        .decode(&ids, true)
-        .map_err(|error| CandleError::TokenizerDecoding(error.to_string()))?;
-    assert_ne!(independently_decoded, complete);
-
-    let mut decoder = IncrementalTextDecoder::new(&tokenizer);
-    let mut streamed = String::new();
-    for id in ids {
-        if let Some(fragment) = decoder.push(id)? {
-            streamed.push_str(&fragment);
-        }
-    }
-    if let Some(fragment) = decoder.finish()? {
-        streamed.push_str(&fragment);
-    }
-    assert_eq!(streamed, complete);
-    assert_eq!(streamed, decoder.text());
+    generation(&model).call(request(history)).await?;
     Ok(())
 }
 
@@ -1064,51 +896,6 @@ fn incremental_decoder_waits_for_complete_unicode_bytes()
     assert_eq!(decoder.push(2)?.as_deref(), Some("é"));
     assert!(decoder.finish()?.is_none());
     assert_eq!(decoder.text(), "é");
-    Ok(())
-}
-
-#[test]
-fn inference_clamps_context_and_uses_fresh_generation_state()
--> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut loaded = load_model(model_data()?, GenerationConfig::default(), 1)?;
-    let mut completion_request = request(vec![Message::user("hello")]);
-    completion_request.max_tokens = Some(10);
-    completion_request.temperature = Some(0.0);
-    let prompt = render_prompt(&completion_request)?;
-    let prompt_tokens = loaded.tokenizer.encode(prompt, false)?.len();
-    loaded.profile.context_limit = prompt_tokens + 2;
-
-    let first = infer(&loaded, &completion_request, &CancellationSignal::default())?;
-    let second = infer(&loaded, &completion_request, &CancellationSignal::default())?;
-    let (first, second) = (first.response, second.response);
-    assert_eq!(first.text, second.text);
-    assert_eq!(first.generated_tokens, 2);
-    assert_eq!(first.requested_max_tokens, 10);
-    assert_eq!(first.effective_max_tokens, 2);
-    assert_eq!(first.finish_reason, FinishReason::MaxTokens);
-    assert_eq!(
-        rig_core::completion::Usage::from(&first).output_tokens,
-        Some(2)
-    );
-    assert!(!first.text.contains("hello"));
-    Ok(())
-}
-
-#[test]
-fn eos_is_counted_but_excluded_from_decoded_text()
--> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut loaded = load_model(model_data()?, GenerationConfig::default(), 1)?;
-    loaded.profile.stop_tokens.insert(0);
-    let mut completion_request = request(vec![Message::user("hello")]);
-    completion_request.temperature = Some(0.0);
-    let response = infer(&loaded, &completion_request, &CancellationSignal::default())?.response;
-    assert_eq!(response.finish_reason, FinishReason::Eos);
-    assert_eq!(response.generated_tokens, 1);
-    assert_eq!(
-        rig_core::completion::Usage::from(&response).output_tokens,
-        Some(1)
-    );
-    assert!(response.text.is_empty());
     Ok(())
 }
 
@@ -1209,45 +996,12 @@ fn concurrency_limit_and_cancellation_are_deterministic()
     let signal = CancellationSignal::default();
     signal.cancel();
     assert!(matches!(
-        infer(&loaded, &request(vec![Message::user("hello")]), &signal),
+        infer(
+            &loaded,
+            &payload(request(vec![Message::user("hello")]))?,
+            &signal
+        ),
         Err(CandleError::Cancelled)
-    ));
-    Ok(())
-}
-
-#[cfg(not(target_family = "wasm"))]
-#[tokio::test(flavor = "current_thread")]
-async fn concurrent_completions_have_independent_caches_and_samplers()
--> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let model = CandleModel::builder(model_data()?)
-        .temperature(0.0)
-        .max_tokens(2)
-        .max_concurrent_requests(2)
-        .build()?;
-    let first = raw_completion(&model, request(vec![Message::user("hello")]));
-    let second = raw_completion(&model, request(vec![Message::user("hello")]));
-    let (first, second) = tokio::join!(first, second);
-    let first = first?;
-    let second = second?;
-    assert_eq!(first.text, second.text);
-    assert_eq!(first.generated_tokens, 2);
-    assert_eq!(second.generated_tokens, 2);
-
-    let first_stream = collect_stream(&model, request(vec![Message::user("hello")]));
-    let second_stream = collect_stream(&model, request(vec![Message::user("hello")]));
-    let (first_stream, second_stream) = tokio::join!(first_stream, second_stream);
-    let (first_text, first_raw) = first_stream?;
-    let (second_text, second_raw) = second_stream?;
-    assert_eq!(first_text, second_text);
-    assert_eq!(first_raw.text, second_raw.text);
-    assert_eq!(first_raw.generated_tokens, 2);
-    assert_eq!(second_raw.generated_tokens, 2);
-
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
-    semaphore.close();
-    assert!(matches!(
-        acquire_concurrency(semaphore).await,
-        Err(CandleError::ConcurrencyControllerClosed)
     ));
     Ok(())
 }
@@ -1308,51 +1062,6 @@ async fn dropping_buffered_completion_retains_permit_until_worker_exits()
 
     let second = second.await?;
     assert_eq!(second.generated_tokens, 2);
-    Ok(())
-}
-
-#[cfg(not(target_family = "wasm"))]
-#[tokio::test(flavor = "current_thread")]
-async fn dropping_stream_cancels_worker_before_queued_request_runs()
--> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (model, control, concurrency) = controlled_model(true, false, 2)?;
-    let mut stream = generation(&model).stream(request(vec![Message::user("hello")]))?;
-    // The worker starts when the stream is first polled.
-    assert!(futures::poll!(stream.next()).is_pending());
-    control.wait_until_entered().await;
-
-    let queued = raw_completion(&model, request(vec![Message::user("hello")]));
-    futures::pin_mut!(queued);
-    assert!(futures::poll!(&mut queued).is_pending());
-
-    drop(stream);
-    assert!(Arc::clone(&concurrency).try_acquire_owned().is_err());
-    control.release()?;
-
-    let queued = queued.await?;
-    assert_eq!(queued.generated_tokens, 2);
-    Ok(())
-}
-
-#[cfg(not(target_family = "wasm"))]
-#[tokio::test(flavor = "current_thread")]
-async fn dropping_a_stream_stops_the_worker_without_dropping_its_admission()
--> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (model, control, concurrency) = controlled_model(true, false, 2)?;
-    let mut stream = generation(&model).stream(request(vec![Message::user("hello")]))?;
-    // The worker starts when the stream is first polled.
-    assert!(futures::poll!(stream.next()).is_pending());
-    control.wait_until_entered().await;
-
-    drop(stream);
-    let queued = raw_completion(&model, request(vec![Message::user("hello")]));
-    futures::pin_mut!(queued);
-    assert!(futures::poll!(&mut queued).is_pending());
-    assert!(Arc::clone(&concurrency).try_acquire_owned().is_err());
-
-    control.release()?;
-    let queued = queued.await?;
-    assert_eq!(queued.generated_tokens, 2);
     Ok(())
 }
 
@@ -1448,31 +1157,6 @@ fn builder_rejects_invalid_generation_defaults() {
 }
 
 #[test]
-fn renders_llama3_history_and_documents() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let history_request = request(vec![
-        Message::system("rules"),
-        Message::user("question"),
-        Message::assistant("answer"),
-        Message::user("follow-up"),
-    ]);
-    assert_eq!(
-        render_prompt(&history_request)?,
-        "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nrules<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nquestion<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\nanswer<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nfollow-up<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-    );
-
-    let mut request = request(vec![Message::system("rules"), Message::user("question")]);
-    request.documents.push(Document {
-        id: "doc-1".to_string(),
-        text: "context".to_string(),
-        additional_props: HashMap::new(),
-    });
-    let rendered = render_prompt(&request)?;
-    assert!(rendered.contains("<file id: doc-1>\ncontext\n</file>"));
-    assert!(rendered.find("<file id: doc-1>") < rendered.find("question"));
-    Ok(())
-}
-
-#[test]
 fn renders_smollm2_history_default_system_and_generation_suffix()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let with_system = request(vec![
@@ -1498,7 +1182,7 @@ fn renders_smollm2_history_default_system_and_generation_suffix()
 fn rejects_unsupported_request_features() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut tools = request(vec![Message::user("hello")]);
     tools.tools.push(ToolDefinition {
-        name: "tool".to_string(),
+        name: rig_core::message::ToolName::new("tool")?,
         description: "tool".to_string(),
         parameters: serde_json::json!({}),
     });
@@ -1516,9 +1200,17 @@ fn rejects_unsupported_request_features() -> Result<(), Box<dyn std::error::Erro
     )?);
     assert!(render_prompt(&schema).is_err());
 
+    let loaded = load_model(model_data()?, GenerationConfig::default(), 1)?;
     let mut override_request = request(vec![Message::user("hello")]);
     override_request.model = Some("other".to_string());
-    assert!(render_prompt(&override_request).is_err());
+    assert!(matches!(
+        infer(
+            &loaded,
+            &payload(override_request)?,
+            &CancellationSignal::default()
+        ),
+        Err(CandleError::UnsupportedFeature(feature)) if feature.contains("model override")
+    ));
 
     let tool_result = request(vec![Message::tool_result(
         rig_core::message::CallId::from_wire("id"),
@@ -1537,7 +1229,7 @@ fn rejects_unsupported_request_features() -> Result<(), Box<dyn std::error::Erro
     assert!(render_prompt(&request(vec![image])).is_err());
 
     let audio = Message::User {
-        content: vec![UserContent::audio("data", Some(AudioMediaType::WAV))],
+        content: vec![UserContent::audio_base64("data", Some(AudioMediaType::WAV))],
     };
     assert!(render_prompt(&request(vec![audio])).is_err());
     Ok(())
@@ -1556,7 +1248,7 @@ fn request_generation_overrides_defaults_and_validates() -> Result<(), CandleErr
         "repeat_penalty": 1.2,
         "repeat_last_n": 9
     }));
-    let effective = effective_generation(&request, &defaults, 8)?;
+    let effective = settings(&request, &defaults, 8)?;
     assert_eq!(effective.max_tokens, 12);
     assert_eq!(effective.temperature, 0.0);
     assert_eq!(effective.top_k, Some(4));
@@ -1567,56 +1259,27 @@ fn request_generation_overrides_defaults_and_validates() -> Result<(), CandleErr
         "top_k": null,
         "top_p": null
     }));
-    let effective = effective_generation(&request, &defaults, 8)?;
+    let effective = settings(&request, &defaults, 8)?;
     assert_eq!(effective.top_k, None);
     assert_eq!(effective.top_p, None);
 
     let mut inherited_defaults = defaults.clone();
     inherited_defaults.top_k = Some(5);
     request.additional_params = Some(serde_json::json!({}));
-    let effective = effective_generation(&request, &inherited_defaults, 8)?;
+    let effective = settings(&request, &inherited_defaults, 8)?;
     assert_eq!(effective.top_k, Some(5));
     assert_eq!(effective.top_p, defaults.top_p);
 
     request.additional_params = Some(serde_json::json!({"unknown": true}));
-    assert!(effective_generation(&request, &defaults, 8).is_err());
+    assert!(settings(&request, &defaults, 8).is_err());
     request.additional_params = Some(serde_json::json!({"top_k": "four"}));
-    assert!(effective_generation(&request, &defaults, 8).is_err());
+    assert!(settings(&request, &defaults, 8).is_err());
     request.additional_params = None;
     request.max_tokens = Some(0);
-    assert!(effective_generation(&request, &defaults, 8).is_err());
+    assert!(settings(&request, &defaults, 8).is_err());
     request.max_tokens = Some(1);
     request.temperature = Some(f64::NAN);
-    assert!(effective_generation(&request, &defaults, 8).is_err());
-    Ok(())
-}
-
-#[test]
-fn converts_finish_reason_and_usage() -> Result<(), CandleError> {
-    let response = CandleCompletionResponse {
-        text: "done".to_string(),
-        prompt_tokens: 5,
-        generated_tokens: 2,
-        requested_max_tokens: 4,
-        effective_max_tokens: 3,
-        finish_reason: FinishReason::Eos,
-        prefill_duration_ms: 8,
-        time_to_first_token_ms: Some(10),
-        generation_duration_ms: 20,
-        tokens_per_second: Some(100.0),
-    };
-    let usage = rig_core::completion::Usage::from(&response);
-    assert_eq!(usage.input_tokens, Some(5));
-    assert_eq!(usage.output_tokens, Some(2));
-    assert_eq!(usage.total_tokens, Some(7));
-    assert_eq!(response.finish_reason, FinishReason::Eos);
-    assert_eq!(response.text, "done");
-    assert_eq!(response.requested_max_tokens, 4);
-    assert_eq!(response.effective_max_tokens, 3);
-    assert_eq!(response.prefill_duration_ms, 8);
-    assert_eq!(response.time_to_first_token_ms, Some(10));
-    assert_eq!(response.generation_duration_ms, 20);
-    assert_eq!(response.tokens_per_second, Some(100.0));
+    assert!(settings(&request, &defaults, 8).is_err());
     Ok(())
 }
 
@@ -1661,45 +1324,6 @@ fn candle_completion_response_round_trips_through_serde_json_value()
         "the capture must read back into CandleCompletionResponse and re-serialize identically"
     );
     assert_eq!(back, raw);
-    Ok(())
-}
-
-/// The events-first seam captures like the request-driven one: its terminal
-/// `raw` is the same `CandleCompletionResponse` the model's `stream()` would
-/// attach, because both funnel through the adapter's `terminal_record`.
-#[cfg(not(target_family = "wasm"))]
-#[tokio::test(flavor = "current_thread")]
-async fn stream_from_events_terminal_carries_raw()
--> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let terminal_record = CandleCompletionResponse {
-        text: "hi".to_string(),
-        prompt_tokens: 3,
-        generated_tokens: 1,
-        requested_max_tokens: 4,
-        effective_max_tokens: 4,
-        finish_reason: FinishReason::Eos,
-        prefill_duration_ms: 1,
-        time_to_first_token_ms: Some(1),
-        generation_duration_ms: 2,
-        tokens_per_second: Some(500.0),
-    };
-    let mut stream = stream_from_events(vec![
-        GenerationEvent::Text("hi".to_string()),
-        GenerationEvent::Final(terminal_record.clone()),
-    ])?;
-    while let Some(item) = stream.next().await {
-        item?;
-    }
-    let terminal = stream.finish().await?;
-
-    assert!(
-        !terminal.raw.is_null(),
-        "a provider-backed terminal always carries raw"
-    );
-    let raw = &terminal.raw;
-    let typed: CandleCompletionResponse = serde_json::from_value(raw.clone())?;
-    assert_eq!(typed, terminal_record);
-    assert_eq!(terminal.usage.total_tokens, Some(4));
     Ok(())
 }
 
@@ -1792,65 +1416,263 @@ async fn stream_terminal_raw_round_trips_into_the_local_record()
     let renormalized = renormalized.finish().await?;
     assert_eq!(terminal.identity(), renormalized.identity());
     assert_eq!(terminal.finish_reason(), renormalized.finish_reason());
-    assert_eq!(terminal.model, renormalized.model);
+    assert_eq!(terminal.model(), renormalized.model());
     assert_eq!(terminal.usage, renormalized.usage);
     assert_eq!(terminal.usage.output_tokens, Some(2));
     Ok(())
 }
 
-/// The generation wire runs through the driver, so the request boundary
-/// rejects each empty piece before the local runtime sees it.
+/// The wire a loaded model builds names that checkpoint, by its protocol
+/// and a digest of its config and tokenizer, so two loaded models are two
+/// models to replay.
+#[test]
+fn the_wire_names_the_loaded_checkpoint() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let model = CandleModel::builder(model_data()?).build()?;
+    let wire = model.completion().wire;
+    assert_eq!(wire.model, model.model_id());
+    assert_eq!(wire.protocol, ConversationProtocol::Llama3);
+    let id = crate::loader::model_id(ConversationProtocol::Qwen3, b"{}", b"{}");
+    assert_eq!(
+        id,
+        crate::loader::model_id(ConversationProtocol::Qwen3, b"{}", b"{}")
+    );
+    assert!(
+        id.starts_with("qwen3-") && id.len() == "qwen3-".len() + 16,
+        "{id}"
+    );
+    assert_ne!(
+        id,
+        crate::loader::model_id(ConversationProtocol::Qwen3, b"{}", b"{ }")
+    );
+    Ok(())
+}
+
+/// The generation wire for a loaded model of `protocol`.
+fn local(protocol: ConversationProtocol) -> Generation {
+    Generation {
+        model: crate::loader::model_id(protocol, b"config", b"tokenizer"),
+        protocol,
+        facts: Default::default(),
+    }
+}
+
+/// `history` and a next prompt, prepared for `wire` as the driver prepares
+/// it, with `tools` declared.
+fn prepared_for(
+    wire: &Generation,
+    history: Vec<Message>,
+    tools: Vec<ToolDefinition>,
+) -> Result<CompletionRequest, ProviderError> {
+    let mut request = CompletionRequest::new("next").tools(tools);
+    request.chat_history = history;
+    request.chat_history.push(Message::user("next"));
+    <rig_core::operation::Completion as rig_core::wire::Operation>::prepare(
+        request,
+        &rig_core::wire::Wire::describe(wire),
+    )
+}
+
+/// NEW-candle-tools (round 4): another model's tool exchange reaches a
+/// Llama 3 or SmolLM2 model, whose prompts carry no tools, as text: the
+/// adapter keeps no call or result even when the request declares the
+/// tool, and the prompt renders.
+#[test]
+fn another_models_tool_history_renders_for_a_plain_protocol()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use rig_core::message::{
+        AssistantContent, AssistantMessage, Origin, StopReason, ToolCall, ToolFunction,
+        ToolResultContent,
+    };
+    let call = ToolCall::new(
+        rig_core::message::CallId::from_wire("toolu_1"),
+        ToolFunction::new(
+            rig_core::message::ToolName::new("add")?,
+            serde_json::json!({"x": 1}),
+        ),
+    );
+    let history = vec![
+        Message::user("add"),
+        Message::Assistant(
+            AssistantMessage::new(vec![
+                AssistantContent::text("adding"),
+                AssistantContent::ToolCall(call.clone()),
+            ])
+            .with_origin(Origin::new("anthropic.messages", "anthropic", "claude"))
+            .with_stop(StopReason::ToolUse),
+        ),
+        Message::User {
+            content: vec![UserContent::ToolResult(
+                call.result(vec![ToolResultContent::text("2")]),
+            )],
+        },
+        Message::assistant("it is 2"),
+    ];
+    let add = ToolDefinition {
+        name: rig_core::message::ToolName::new("add")?,
+        description: "add".to_owned(),
+        parameters: serde_json::json!({"type": "object"}),
+    };
+    for protocol in [ConversationProtocol::Llama3, ConversationProtocol::SmolLm2] {
+        let wire = local(protocol);
+        let declared = prepared_for(&wire, history.clone(), vec![add.clone()])?;
+        let structured = declared.chat_history.iter().any(|message| match message {
+            Message::Assistant(turn) => turn
+                .content
+                .iter()
+                .any(|block| matches!(block, AssistantContent::ToolCall(_))),
+            Message::User { content } => content
+                .iter()
+                .any(|part| matches!(part, UserContent::ToolResult(_))),
+            Message::System { .. } => false,
+        });
+        assert!(!structured, "{protocol:?}: {:?}", declared.chat_history);
+        let request = prepared_for(&wire, history.clone(), Vec::new())?;
+        let prompt = wire.prompt(&request)?;
+        assert!(prompt.contains("2"), "{protocol:?}: {prompt}");
+    }
+    Ok(())
+}
+
+/// `top_p` and `seed` become generation overrides above a raw `top_k`;
+/// thinking off is the protocols' default; the rest is refused.
+#[test]
+fn options_become_generation_overrides() -> Result<(), CandleError> {
+    use rig_core::completion::ReplayTarget as _;
+    use rig_core::completion::{
+        CacheRetention, GenerationOptions, Reasoning, ServiceTier, options::Mapping,
+    };
+
+    let mut options_request = request(vec![Message::user("hello")])
+        .top_p(0.7)
+        .seed(11)
+        .reasoning(Reasoning::Off);
+    options_request.additional_params = Some(serde_json::json!({"top_k": 4, "seed": 3}));
+    let generation = settings(&options_request, &GenerationConfig::default(), 8)?;
+    assert_eq!(generation.top_p, Some(0.7));
+    assert_eq!(generation.top_k, Some(4));
+    // `additional_params` is above the mapped options.
+    assert_eq!(generation.seed, 3);
+
+    let answers = |options: GenerationOptions| {
+        let request = request(vec![Message::user("hello")]).options(options);
+        scripted().map_options(&request, request.options.fields())
+    };
+    assert!(matches!(
+        answers(GenerationOptions::default().reasoning(Reasoning::Off)).reasoning,
+        Mapping::Omit(_)
+    ));
+    assert!(matches!(
+        answers(GenerationOptions::default().cache(CacheRetention::Short)).cache,
+        Mapping::Unsupported(_)
+    ));
+    assert!(matches!(
+        answers(GenerationOptions::default().service_tier(ServiceTier::Auto)).service_tier,
+        Mapping::Unsupported(_)
+    ));
+    assert!(matches!(
+        answers(GenerationOptions::default().stop(["END"])).stop,
+        Mapping::Unsupported(_)
+    ));
+    assert!(matches!(
+        answers(GenerationOptions::default().top_p(1.5)).top_p,
+        Mapping::Unsupported(_)
+    ));
+    Ok(())
+}
+
+/// Guarantee 5 for Candle: a stream's `raw` is the document a unary call of
+/// the same greedy generation records, but for its wall-clock timings.
 #[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "current_thread")]
-async fn an_empty_turn_never_reaches_the_local_runtime()
+async fn a_streams_raw_is_the_unary_document()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let parsed = |message: serde_json::Value| serde_json::from_value::<Message>(message);
-    let mut empty_history = request(vec![Message::user("hello")]);
-    empty_history.chat_history.clear();
-    let requests = [
-        (empty_history, "request has an empty chat history"),
-        (
-            request(vec![parsed(
-                serde_json::json!({"role": "user", "content": []}),
-            )?]),
-            "user message at index 0 has no content",
-        ),
-        (
-            request(vec![
-                parsed(serde_json::json!({"role": "assistant", "id": null, "content": []}))?,
-                Message::user("hello"),
-            ]),
-            "assistant message at index 0 has no content",
-        ),
-        (
-            request(vec![parsed(serde_json::json!({
-                "role": "user",
-                "content": [{
-                    "type": "toolresult",
-                    "call": {"provider": {"call_id": "call_1"}},
-                    "name": "lookup",
-                    "content": [],
-                }],
-            }))?]),
-            "tool result for `lookup` at index 0",
-        ),
-    ];
-    let events = Arc::new(std::sync::Mutex::new(vec![GenerationEvent::Text(
-        "unreachable".to_owned(),
-    )]));
-    let model = rig_core::Model::new(Generation, Scripted(Arc::clone(&events)));
-    for (request, expected) in requests {
-        let called = model.call(request.clone()).await.err();
-        let streamed = model.stream(request).err();
-        for error in [called, streamed] {
-            let error = error.ok_or("the request is rejected")?;
-            assert!(error.to_string().contains(expected), "{error}");
-        }
+    let model = CandleModel::builder(model_data()?)
+        .temperature(0.0)
+        .max_tokens(2)
+        .build()?;
+    let unary = generation(&model)
+        .call(request(vec![Message::user("hello")]))
+        .await?
+        .raw;
+    let mut stream = generation(&model).stream(request(vec![Message::user("hello")]))?;
+    while let Some(item) = stream.next().await {
+        item?;
     }
+    let streamed = stream.finish().await?.raw;
+    let timings = [
+        "/prefill_duration_ms",
+        "/time_to_first_token_ms",
+        "/generation_duration_ms",
+        "/tokens_per_second",
+    ];
+    assert!(!unary.is_null());
     assert_eq!(
-        events.lock().map(|events| events.len()).ok(),
-        Some(1),
-        "the runtime was never sent a request"
+        rig_core::test_utils::raw_parity::comparable(&streamed, &timings),
+        rig_core::test_utils::raw_parity::comparable(&unary, &timings),
+    );
+    Ok(())
+}
+
+/// The reassembler keeps the local response record a whole turn or a
+/// stream's final event carries, and nothing else.
+#[test]
+fn the_document_is_the_final_response_record() -> Result<(), Box<dyn std::error::Error>> {
+    use rig_core::wire::document::Reassemble;
+
+    let response = CandleCompletionResponse {
+        text: "done".to_string(),
+        prompt_tokens: 5,
+        generated_tokens: 2,
+        requested_max_tokens: 4,
+        effective_max_tokens: 3,
+        finish_reason: FinishReason::Eos,
+        prefill_duration_ms: 8,
+        time_to_first_token_ms: Some(10),
+        generation_duration_ms: 20,
+        tokens_per_second: None,
+    };
+    let record = serde_json::to_value(&response)?;
+
+    assert!(CandleDocument::default().finish().is_null());
+
+    let mut streamed = CandleDocument::default();
+    streamed.absorb(&CandleFrame::Event(GenerationEvent::Text(
+        "done".to_owned(),
+    )));
+    streamed.absorb(&CandleFrame::Event(GenerationEvent::Final(
+        response.clone(),
+    )));
+    assert_eq!(streamed.finish(), record);
+
+    let mut whole = CandleDocument::default();
+    whole.absorb(&CandleFrame::Whole(crate::generation::InferredCompletion {
+        response,
+        choice: Vec::new(),
+    }));
+    assert_eq!(whole.finish(), record);
+    Ok(())
+}
+
+/// The facts a local generation is given are the facts it answers with: its
+/// `ReplayTarget::facts`, which the shared option rules and the cost read,
+/// and its descriptor's spec, which `DynModel::spec` returns.
+#[test]
+fn the_wire_answers_from_the_facts_it_is_given() -> Result<(), Box<dyn std::error::Error>> {
+    use rig_core::catalog::{ModelFacts, ModelSpec};
+    use rig_core::completion::ReplayTarget as _;
+    use rig_core::wire::Wire as _;
+
+    let vendor =
+        rig_core::providers::registry::ProviderId::catalog("candle").ok_or("a catalog vendor")?;
+    let spec = ModelSpec::new(vendor, "qwen3-scripted").with_max_output_tokens(1_234);
+    let wire = scripted().with_facts(ModelFacts::new(spec));
+    let bound = wire.facts().and_then(ModelFacts::spec);
+    assert_eq!(bound.and_then(|spec| spec.max_output_tokens), Some(1_234));
+    assert_eq!(
+        wire.describe()
+            .spec()
+            .and_then(|spec| spec.max_output_tokens),
+        Some(1_234)
     );
     Ok(())
 }

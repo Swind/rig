@@ -9,8 +9,8 @@
 #![allow(clippy::expect_used)]
 
 use rig_candle::{
-    CandleCompletionResponse, CandleFrame, FinishReason as CandleFinishReason, Generation,
-    GenerationEvent,
+    CandleCompletionResponse, CandleFrame, ConversationProtocol,
+    FinishReason as CandleFinishReason, Generation, GenerationEvent,
 };
 use rig_core::completion::{CompletionRequest, FinishReason};
 use rig_core::driver::{Exchange, Model, Opened, Opening, Transport};
@@ -27,7 +27,11 @@ type CandleEvent = GenerationEvent;
 struct Scripted(std::sync::Arc<std::sync::Mutex<Vec<Result<CandleEvent, ProviderError>>>>);
 
 impl Transport<Generation> for Scripted {
-    fn send(&self, _request: CompletionRequest, _exchange: Exchange) -> Opening<CandleFrame> {
+    fn send(
+        &self,
+        _request: rig_candle::CandleRequest,
+        _exchange: Exchange,
+    ) -> Opening<CandleFrame> {
         let events = match self.0.lock() {
             Ok(mut events) => std::mem::take(&mut *events),
             Err(_) => {
@@ -59,8 +63,13 @@ fn driver() -> WireDriver {
                     Err(error) => Err(ProviderError::Http(error.into())),
                 })
                 .collect();
+            let generation = Generation {
+                model: "qwen3-scripted".to_owned(),
+                protocol: ConversationProtocol::Qwen3,
+                facts: Default::default(),
+            };
             let stream = Model::new(
-                Generation,
+                generation,
                 Scripted(std::sync::Arc::new(std::sync::Mutex::new(events))),
             )
             .stream(CompletionRequest::new("hello"))?;

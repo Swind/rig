@@ -6,3 +6,12 @@ xtask = "run --package xtask --quiet --"
 [env]
 # Match the native library to the pinned lbug Rust binding.
 LBUG_VERSION = { value = "0.20.4", force = false }
+# Cassette replays in this workspace check every request against the
+# snapshot beside its fixture (`cargo xtask cassette snapshots`). The engine
+# leaves snapshots off unless this is set, so published users never see them;
+# a value already in the environment (`write`, `off`) wins.
+RIG_CASSETTE_SNAPSHOTS = "check"
+# They also match request bodies by coarse shape, so a change to how Rig
+# writes a request replays without a re-record; the snapshot still pins its
+# bytes. The engine matches exactly unless this is set.
+RIG_CASSETTE_MATCHING = "shape"

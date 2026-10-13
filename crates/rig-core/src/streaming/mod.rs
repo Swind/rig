@@ -25,10 +25,10 @@ use serde::{Deserialize, Serialize};
 use crate::completion::CompletionResponse;
 use crate::driver::{lock, record_request_id};
 use crate::error::{ErrorReport, ProviderError};
-use crate::message::ToolResult;
+pub use crate::json_utils::parse_partial_arguments;
 use crate::operation::{Completion, Turn};
 use crate::wasm_compat::WasmBoxedStream;
-use crate::wire::{Fold, Operation, Reply, Shared};
+use crate::wire::{Operation, Shared};
 pub use event::{Item, Part, PartKind, SequenceError, StreamEvent, Transcript};
 
 /// Unmodeled JSON payload with content-redacted `Debug` output.
@@ -66,10 +66,14 @@ impl From<serde_json::Value> for UnknownPayload {
 #[cfg(test)]
 mod unknown_payload_tests;
 
-/// One item of a completion stream relayed over the bus: an item of the
-/// reply, or the response the origin folded when the provider ended it.
+/// One item of a completion stream relayed over the bus: who the reply is
+/// from, an item of the reply, or the response the origin folded when the
+/// provider ended it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Relayed {
+    /// The wire, provider and model the reply is from, sent before its
+    /// first item, so a reply cut short still knows its origin.
+    Origin(crate::message::Origin),
     /// An event, or a payload the origin's decoder did not model.
     Item(Item<StreamEvent>),
     /// The provider ended the reply; the origin's response.
@@ -128,18 +132,7 @@ impl<Op: Operation> Streamed<Op> {
             }
             {
                 let mut shared = lock(&self.shared);
-                if let Some(item) = shared.items.pop_front() {
-                    let item = match item {
-                        Ok(Item::Event(event)) => {
-                            shared.fold.absorb(&event).map(|()| Item::Event(event))
-                        }
-                        Ok(unknown) => Ok(unknown),
-                        // An id an upstream constructor already attached
-                        // wins: it saw the reply.
-                        Err(error) => {
-                            Err(error.with_provider_request_id(shared.request_id.clone()))
-                        }
-                    };
+                if let Some(item) = shared.take() {
                     if let Err(error) = &item {
                         record_request_id(&self.span, error.provider_request_id());
                         shared.items.clear();
@@ -157,21 +150,6 @@ impl<Op: Operation> Streamed<Op> {
                 Poll::Ready(Some(())) => {}
                 Poll::Ready(None) => self.reading = None,
             }
-        }
-    }
-
-    /// What the driver learned about the reply so far.
-    fn reply(&self, shared: &mut Shared<Op>) -> Reply {
-        Reply {
-            provider: self.provider.clone(),
-            // A whole body is the reply's document; a stream's is what its
-            // decoder recorded.
-            raw: shared
-                .document
-                .clone()
-                .or_else(|| shared.raw.clone())
-                .unwrap_or(serde_json::Value::Null),
-            provider_request_id: shared.request_id.clone(),
         }
     }
 
@@ -196,38 +174,41 @@ impl<Op: Operation> Streamed<Op> {
         if let Some(error) = self.failed.take() {
             return Err((error, route(&self)));
         }
-        let (end, response, reply, path) = {
-            let mut shared = lock(&self.shared);
-            let reply = self.reply(&mut shared);
-            (
-                shared.end.take(),
-                shared.response.take(),
-                reply,
-                shared.route.clone(),
-            )
+        let path = route(&self);
+        let Ok(shared) = Arc::try_unwrap(self.shared) else {
+            return Err((
+                ProviderError::Response("the reply is still being read".to_owned()),
+                path,
+            ));
         };
-        if let Some(response) = response {
-            return Ok(response);
-        }
-        let Some(end) = end else {
-            return Err((ProviderError::Truncated, path));
-        };
-        let fold = match Arc::try_unwrap(self.shared) {
-            Ok(shared) => {
-                shared
-                    .into_inner()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .fold
-            }
-            Err(_) => {
-                return Err((
-                    ProviderError::Response("the reply is still being read".to_owned()),
-                    path,
-                ));
-            }
-        };
-        fold.finish(end, reply).map_err(|error| (error, path))
+        shared
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .conclude(&self.provider)
+            .map_err(|error| (error, path))
     }
+}
+
+/// The assistant content a stream's `items` delivered, as its partial reply
+/// holds it: every part that ended, in start order, and the text of a text
+/// or reasoning part still open. The items hold no provider end, so no
+/// block keeps its provider item and the content replays canonically.
+pub fn delivered(items: &[Item<StreamEvent>]) -> Vec<crate::message::AssistantContent> {
+    use crate::wire::Fold;
+    let mut turn = Turn::relayed("delivered");
+    for item in items {
+        if let Item::Event(event) = item
+            && turn.absorb(event).is_err()
+        {
+            break;
+        }
+    }
+    let reply = crate::wire::Reply {
+        provider: String::new(),
+        raw: serde_json::Value::Null,
+        provider_request_id: None,
+    };
+    turn.partial(None, &reply, None).choice
 }
 
 impl Streamed<Completion> {
@@ -244,6 +225,10 @@ impl Streamed<Completion> {
                 let ended = {
                     let mut shared = lock(&writer);
                     match item {
+                        Ok(Relayed::Origin(origin)) => {
+                            Turn::set_origin(&mut shared.fold, origin);
+                            false
+                        }
                         Ok(Relayed::Item(item)) => {
                             shared.items.push_back(Ok(item));
                             false
@@ -274,7 +259,9 @@ impl Streamed<Completion> {
     /// folds into, or the error that ended it. A reply cut short closes the
     /// relay without a response, as its transport closed.
     pub fn into_relay(mut self) -> StreamEvents {
+        let origin = lock(&self.shared).fold.origin().clone();
         Box::pin(async_stream::stream! {
+            yield Ok(Relayed::Origin(origin));
             while let Some(item) = self.next().await {
                 match item {
                     Ok(item) => yield Ok(Relayed::Item(item)),
@@ -297,27 +284,15 @@ impl Streamed<Completion> {
     /// once it arrived. Valid after an error, and after the caller stopped
     /// polling.
     pub fn partial(&self) -> CompletionResponse {
-        let mut shared = lock(&self.shared);
+        let shared = lock(&self.shared);
         if let Some(response) = &shared.response {
             return response.clone();
         }
-        let reply = self.reply(&mut shared);
-        shared.fold.partial(shared.end.as_ref(), &reply)
-    }
-
-    /// The assistant message id the reply recorded so far.
-    pub fn message_id(&self) -> Option<String> {
-        let shared = lock(&self.shared);
-        shared
-            .response
-            .as_ref()
-            .and_then(|response| response.message_id.clone())
-            .or_else(|| shared.fold.message_id().map(str::to_owned))
-    }
-
-    /// The issuer this reply's reasoning is sealed to.
-    pub fn reasoning_issuer(&self) -> crate::message::Issuer {
-        lock(&self.shared).fold.reasoning_issuer()
+        shared.fold.partial(
+            shared.end.as_ref(),
+            &shared.reply(&self.provider),
+            self.failed.as_ref(),
+        )
     }
 }
 
@@ -326,24 +301,6 @@ impl<Op: Operation> Stream for Streamed<Op> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.get_mut().poll_item(cx)
-    }
-}
-
-/// Streamed user content. This content is primarily used to represent tool results from tool calls made during a multi-turn/step agent prompt.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(untagged)]
-pub enum StreamedUserContent {
-    /// Tool result emitted during a multi-turn streaming agent loop.
-    ToolResult {
-        /// The result; `tool_result.call` is the id of the call it answers.
-        tool_result: ToolResult,
-    },
-}
-
-impl StreamedUserContent {
-    /// A streamed tool result.
-    pub fn tool_result(tool_result: ToolResult) -> Self {
-        Self::ToolResult { tool_result }
     }
 }
 

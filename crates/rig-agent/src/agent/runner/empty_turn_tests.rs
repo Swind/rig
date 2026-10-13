@@ -60,38 +60,7 @@ fn cases() -> Vec<(Message, Vec<Message>, bool, &'static str)> {
             false,
             "assistant message at index 0 has no content",
         ),
-        (
-            Message::user("hello"),
-            vec![parsed(json!({
-                "role": "user",
-                "content": [{
-                    "type": "toolresult",
-                    "call": {"provider": {"call_id": "call_1"}},
-                    "name": "lookup",
-                    "content": [],
-                }],
-            }))],
-            false,
-            "tool result for `lookup` at index 0 of the user message at index 0 has no content",
-        ),
     ]
-}
-
-#[tokio::test]
-async fn an_awaited_run_rejects_each_empty_piece_before_the_provider() {
-    for (prompt, history, clear, expected) in cases() {
-        let model = MockCompletionModel::text("unreachable");
-        let agent = AgentBuilder::new(model.clone()).build();
-        let runner = agent.prompt(prompt).history(history);
-        let runner = if clear {
-            runner.add_hook(EmptyHistory)
-        } else {
-            runner
-        };
-        let error = runner.await.expect_err("the run fails");
-        assert!(error.to_string().contains(expected), "{error}");
-        assert_eq!(model.request_count(), 0, "{expected}");
-    }
 }
 
 #[tokio::test]

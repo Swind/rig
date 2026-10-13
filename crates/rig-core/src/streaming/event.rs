@@ -2,9 +2,11 @@
 //! it writes through the reply's part handles
 //! ([`Out`](crate::wire::Out)), and the writer emits each part's start, its
 //! fragments and its end, in that order. A [`Part`] is a part's position in
-//! the response's `choice`; only this crate constructs one, so code outside
-//! the writer cannot build an event out of order. A recorded stream reads
-//! back through [`Transcript::parse`], the one place a sequence is checked.
+//! the response's `choice`; only this crate constructs one in code, so code
+//! outside the writer cannot build an event out of order. An item also reads
+//! back from its serialized form on its own, unchecked, so a client can
+//! decode a relayed stream as it arrives; [`Transcript::parse`] is the one
+//! place a sequence is checked.
 //!
 //! ```
 //! use rig_core::streaming::{PartKind, StreamEvent, Transcript};
@@ -24,17 +26,17 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::message::AssistantContent;
+use crate::message::{AssistantContent, ToolName};
 
 use super::UnknownPayload;
 
 /// A part's position in the response's `choice`. Only this crate constructs
-/// one:
+/// one, though it reads back from its serialized form:
 ///
 /// ```compile_fail,E0423
 /// let part = rig_core::streaming::Part(0);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Part(u32);
 
@@ -61,19 +63,27 @@ pub enum PartKind {
     ToolCall,
     /// An image.
     Image,
+    /// A provider item with no canonical meaning.
+    Opaque,
 }
 
 /// One event of a completion stream: a part starts, grows, or ends with the
-/// content it finalized.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// content it finalized. Deserializing one event checks nothing about its
+/// order; read a sequence through [`Transcript::parse`] to check it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum StreamEvent {
-    /// A part opened.
+    /// A part opened. A tool call opens once its tool is named, so a call
+    /// streams its arguments under a known tool.
     Start {
         /// The part.
         part: Part,
         /// What it holds.
         kind: PartKind,
+        /// The tool a [`PartKind::ToolCall`] names as it opens; `None` for
+        /// every other kind. The call's end states the name it settled on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<ToolName>,
     },
     /// A text part grew.
     Text {
@@ -89,11 +99,13 @@ pub enum StreamEvent {
         /// The fragment.
         text: String,
     },
-    /// A tool call's arguments, as the provider sent them.
+    /// A tool call's arguments grew. The fragments of one call, joined,
+    /// are the argument JSON the provider sent; read an incomplete prefix
+    /// with [`parse_partial_arguments`](super::parse_partial_arguments).
     Arguments {
         /// The part.
         part: Part,
-        /// The raw JSON arguments.
+        /// The fragment of raw argument JSON.
         json: String,
     },
     /// A part ended with the content it finalized.
@@ -142,14 +154,16 @@ pub enum Item<E> {
 }
 
 /// A completion stream's items read back from their serialized form, in an
-/// order the writer could have produced: each part starts once, at the next
-/// position, grows only while open and with its own kind of fragment, and
-/// ends once. Unmodeled payloads may come anywhere.
+/// order the writer could have produced: each part starts once, at a
+/// position no part took before, grows only while open and with its own
+/// kind of fragment, and ends once. Positions follow the order provider
+/// items opened, so a dropped item leaves a gap. Unmodeled payloads may come
+/// anywhere.
 #[derive(Debug, Clone, Default)]
 pub struct Transcript {
     items: Vec<Item<StreamEvent>>,
     /// Each started part's kind, and whether it ended.
-    parts: Vec<(PartKind, bool)>,
+    parts: std::collections::BTreeMap<usize, (PartKind, bool)>,
 }
 
 impl PartialEq for Transcript {
@@ -170,45 +184,20 @@ pub enum SequenceError {
     /// The value is not a list of stream items.
     #[error("not a list of stream items: {0}")]
     Shape(String),
-    /// An event names a part that has not started, or a start skips a
+    /// An event names a part that has not started, or a start reuses a
     /// position.
     #[error("item {0} names a part that has not started")]
     UnknownPart(usize),
     /// A part ended twice, or grew after its end.
     #[error("item {0} touches a part that already ended")]
     EndedTwice(usize),
-    /// A fragment or end does not match the part's kind.
+    /// A fragment or end does not match the part's kind, or a start names a
+    /// tool for a part that is not a call, or none for one that is.
     #[error("item {0} does not match its part's kind")]
     WrongKind(usize),
     /// A part started and never ended.
     #[error("part {0} never ended")]
     Unclosed(usize),
-}
-
-/// The serialized form of one event, before its order is checked.
-#[derive(Deserialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
-enum RawEvent {
-    Start {
-        part: u32,
-        kind: PartKind,
-    },
-    Text {
-        part: u32,
-        text: String,
-    },
-    Reasoning {
-        part: u32,
-        text: String,
-    },
-    Arguments {
-        part: u32,
-        json: String,
-    },
-    End {
-        part: u32,
-        content: AssistantContent,
-    },
 }
 
 impl Transcript {
@@ -223,39 +212,9 @@ impl Transcript {
     /// [`Self::parse`] for a stream that stopped early (an error or a
     /// cancellation): parts may still be open at its end.
     pub fn parse_prefix(value: serde_json::Value) -> Result<Self, SequenceError> {
-        let raw: Vec<Item<RawEvent>> = serde_json::from_value(value)
+        let items: Vec<Item<StreamEvent>> = serde_json::from_value(value)
             .map_err(|error| SequenceError::Shape(error.to_string()))?;
-        let mut transcript = Self::default();
-        for item in raw {
-            transcript.push(match item {
-                Item::Unknown(payload) => Item::Unknown(payload),
-                Item::Event(RawEvent::Start { part, kind }) => Item::Event(StreamEvent::Start {
-                    part: Part(part),
-                    kind,
-                }),
-                Item::Event(RawEvent::Text { part, text }) => Item::Event(StreamEvent::Text {
-                    part: Part(part),
-                    text,
-                }),
-                Item::Event(RawEvent::Reasoning { part, text }) => {
-                    Item::Event(StreamEvent::Reasoning {
-                        part: Part(part),
-                        text,
-                    })
-                }
-                Item::Event(RawEvent::Arguments { part, json }) => {
-                    Item::Event(StreamEvent::Arguments {
-                        part: Part(part),
-                        json,
-                    })
-                }
-                Item::Event(RawEvent::End { part, content }) => Item::Event(StreamEvent::End {
-                    part: Part(part),
-                    content,
-                }),
-            })?;
-        }
-        Ok(transcript)
+        Self::from_items(items)
     }
 
     /// Append the next item a stream yielded, refusing one the writer could
@@ -265,11 +224,13 @@ impl Transcript {
         if let Item::Event(event) = &item {
             let index = event.part().index();
             let kind = match event {
-                StreamEvent::Start { kind, .. } => {
-                    if index != self.parts.len() {
+                StreamEvent::Start { kind, name, .. } => {
+                    if (*kind == PartKind::ToolCall) != name.is_some() {
+                        return Err(SequenceError::WrongKind(position));
+                    }
+                    if self.parts.insert(index, (*kind, false)).is_some() {
                         return Err(SequenceError::UnknownPart(position));
                     }
-                    self.parts.push((*kind, false));
                     None
                 }
                 StreamEvent::Text { .. } => Some(PartKind::Text),
@@ -280,10 +241,11 @@ impl Transcript {
                     AssistantContent::Reasoning(_) => PartKind::Reasoning,
                     AssistantContent::ToolCall(_) => PartKind::ToolCall,
                     AssistantContent::Image(_) => PartKind::Image,
+                    AssistantContent::Opaque(_) => PartKind::Opaque,
                 }),
             };
             if let Some(kind) = kind {
-                match self.parts.get_mut(index) {
+                match self.parts.get_mut(&index) {
                     None => return Err(SequenceError::UnknownPart(position)),
                     Some((_, true)) => return Err(SequenceError::EndedTwice(position)),
                     Some((open, false)) if *open != kind => {
@@ -298,8 +260,8 @@ impl Transcript {
     }
 
     fn check_closed(&self) -> Result<(), SequenceError> {
-        match self.parts.iter().position(|(_, ended)| !ended) {
-            Some(part) => Err(SequenceError::Unclosed(part)),
+        match self.parts.iter().find(|(_, (_, ended))| !ended) {
+            Some((part, _)) => Err(SequenceError::Unclosed(*part)),
             None => Ok(()),
         }
     }
@@ -357,9 +319,9 @@ impl<'de> Deserialize<'de> for Transcript {
 }
 
 // The stream vocabulary crosses threads on every target: the bus sends it
-// over a channel and the effect log records it.
+// over a channel, the effect log records it, and a client reads it back.
 const _: fn() = || {
-    fn assert_wire<T: Clone + Send + Sync + 'static + Serialize>() {}
+    fn assert_wire<T: Clone + Send + Sync + 'static + Serialize + serde::de::DeserializeOwned>() {}
     assert_wire::<StreamEvent>();
     assert_wire::<Transcript>();
     assert_wire::<Item<StreamEvent>>();

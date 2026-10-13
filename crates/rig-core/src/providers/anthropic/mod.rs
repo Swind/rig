@@ -14,8 +14,15 @@
 //! Pair a wire with a transport in a [`Model`](crate::Model) to send it.
 
 pub mod completion;
+pub mod extension;
+pub mod modality;
+mod options;
 pub mod streaming;
 pub mod wire;
+
+/// The provider name Anthropic's own Messages API reports and keys its
+/// typed options by.
+pub const PROVIDER_NAME: &str = "anthropic";
 
 pub use crate::client::anthropic::Anthropic;
 pub use completion::{
@@ -23,6 +30,8 @@ pub use completion::{
     CLAUDE_OPUS_4_8, CLAUDE_OPUS_5, CLAUDE_OPUS_5_5, CLAUDE_SONNET_4_6, CLAUDE_SONNET_5,
     CLAUDE_SONNET_5_5,
 };
+pub use modality::{Models, Verify};
 pub use wire::{
-    ANTHROPIC, AnthropicConfig, Dialect, MaxTokens, Messages, Models, Quirks, Verify, compatible,
+    ANTHROPIC, AnthropicConfig, Dialect, MaxTokens, Messages, Quirks, ToolInputStreaming,
+    compatible,
 };

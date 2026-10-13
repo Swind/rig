@@ -1,4 +1,4 @@
-use rig::http_client::{DynHttpClient, ReqwestClient};
+use rig::http_client::DynHttpClient;
 use rig::providers::openai::{OpenAIConfig, Route};
 use rig_test_support::cassette_models::OpenAiModels;
 use std::future::Future;
@@ -62,7 +62,7 @@ async fn openai_cassette(spec: impl Into<CassetteSpec>) -> (ProviderCassette, Op
     let openai = OpenAiCassette::new(
         cassette.api_key("OPENAI_API_KEY"),
         cassette.base_url(),
-        rig::rig_reqwest::shared(),
+        rig_test_support::cassettes::local_http(),
     );
 
     (cassette, openai)
@@ -73,36 +73,6 @@ async fn openai_completions_cassette(
 ) -> (ProviderCassette, OpenAiModels) {
     let (cassette, openai) = openai_cassette(spec).await;
     (cassette, openai.chat)
-}
-
-/// Cassette wrapper for the run-lifecycle matrix (PR #2407): the client sends
-/// through a [`DynHttpClient`] carrying the supplied [`HttpMiddleware`], so
-/// the same recorded exchange exercises the transport middleware seam and the
-/// run lifecycle hooks together (see
-/// `crates/rig-cassette/fixtures/cassettes/openai/lifecycle_matrix/`).
-pub(super) async fn with_openai_lifecycle_cassette<M, F, Fut>(
-    spec: impl Into<CassetteSpec>,
-    middleware: M,
-    test_body: F,
-) where
-    M: rig::http_client::HttpMiddleware + 'static,
-    F: FnOnce(OpenAiCassette) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let cassette = ProviderCassette::start(
-        &crate::cassettes::cassette_root(),
-        "openai",
-        spec,
-        "https://api.openai.com/v1",
-    )
-    .await;
-    let openai = OpenAiCassette::new(
-        cassette.api_key("OPENAI_API_KEY"),
-        cassette.base_url(),
-        DynHttpClient::new(ReqwestClient::default()).with_middleware(middleware),
-    );
-    let result = AssertUnwindSafe(test_body(openai)).catch_unwind().await;
-    cassette.finish_after_test(result).await;
 }
 
 /// The effect corpus's retrieval matrix (Matrix A):
@@ -237,18 +207,6 @@ where
     }
 }
 
-/// Per-bug wrapper for the model-turn termination-metadata matrix
-/// (`crates/rig-cassette/fixtures/cassettes/openai/turn_termination_matrix/`), rig#2184.
-pub(super) async fn with_openai_turn_metadata_cassette<F, Fut>(
-    spec: impl Into<CassetteSpec>,
-    test_body: F,
-) where
-    F: FnOnce(OpenAiCassette) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    with_openai_cassette(spec, test_body).await;
-}
-
 pub(super) async fn with_openai_completions_cassette<F, Fut>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
@@ -306,18 +264,6 @@ pub(super) async fn with_openai_refusal_cassette<F, Fut>(
 /// Per-bug wrapper for the output-token-cap spelling matrix
 /// (`crates/rig-cassette/fixtures/cassettes/openai/max_completion_tokens_matrix/`).
 pub(super) async fn with_openai_max_tokens_cassette<F, Fut>(
-    spec: impl Into<CassetteSpec>,
-    test_body: F,
-) where
-    F: FnOnce(OpenAiCassette) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    with_openai_cassette(spec, test_body).await;
-}
-
-/// Per-bug wrapper for the truncated-turn matrix
-/// (`crates/rig-cassette/fixtures/cassettes/openai/truncated_turn_matrix/`).
-pub(super) async fn with_openai_truncation_cassette<F, Fut>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
 ) where
@@ -469,7 +415,7 @@ pub(super) async fn with_openai_websocket_cassette<F, Fut>(
     let openai = OpenAiCassette::new(
         "sk-invalid-websocket-edge-matrix-key",
         cassette.base_url(),
-        rig::rig_reqwest::shared(),
+        rig_test_support::cassettes::local_http(),
     );
     let result = AssertUnwindSafe(test_body(openai)).catch_unwind().await;
     cassette.finish_after_test(result).await;
@@ -496,7 +442,7 @@ pub(super) async fn with_openai_cassette_bogus_key<F, Fut>(
     let openai = OpenAiCassette::new(
         "sk-invalid-edge-matrix-key",
         cassette.base_url(),
-        rig::rig_reqwest::shared(),
+        rig_test_support::cassettes::local_http(),
     );
     let result = AssertUnwindSafe(test_body(openai)).catch_unwind().await;
     cassette.finish_after_test(result).await;
@@ -584,18 +530,35 @@ pub(super) async fn with_openai_prompt_caching_cassette<F, Fut>(
     with_openai_cassette(spec, test_body).await;
 }
 
-/// [`with_openai_prompt_caching_cassette`] for the chat-completions wire.
-///
-/// OpenAI's two surfaces are two *different* cache paths with two different
-/// usage mappings (`prompt_tokens_details.cached_tokens` versus
-/// `input_tokens_details.cached_tokens`), so each is recorded separately rather
-/// than assumed to behave like its sibling.
-pub(super) async fn with_openai_completions_prompt_caching_cassette<F, Fut>(
-    spec: impl Into<CassetteSpec>,
-    test_body: F,
-) where
-    F: FnOnce(OpenAiModels) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    with_openai_completions_cassette(spec, test_body).await;
+/// `options` as OpenAI's typed provider options.
+pub(super) fn openai_options(
+    options: rig::providers::openai::extension::OpenAiOptions,
+) -> rig::completion::ProviderOptions {
+    rig::completion::ProviderOptions::new().set(options)
+}
+
+/// OpenAI's shared provider options: `store`, and `prompt_cache_key` when
+/// given.
+pub(super) fn shared_options(
+    store: Option<bool>,
+    prompt_cache_key: Option<&str>,
+) -> rig::completion::ProviderOptions {
+    let mut options = rig::providers::openai::extension::OpenAiOptions::new();
+    if let Some(store) = store {
+        options = options.store(store);
+    }
+    if let Some(key) = prompt_cache_key {
+        options = options.prompt_cache_key(key);
+    }
+    openai_options(options)
+}
+
+/// `store: false` as a typed provider option.
+pub(super) fn stateless() -> rig::completion::ProviderOptions {
+    shared_options(Some(false), None)
+}
+
+/// A reasoning effort as typed generation options.
+pub(super) fn effort(effort: rig::completion::Effort) -> rig::completion::GenerationOptions {
+    rig::completion::GenerationOptions::default().reasoning(effort)
 }

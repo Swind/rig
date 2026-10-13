@@ -7,9 +7,9 @@ use crate::providers::doubleword::QWEN3_EMBEDDING_8B;
 use crate::providers::mistral::embedding::{CODESTRAL_EMBED, MISTRAL_EMBED};
 use crate::providers::openai::embedding::TEXT_EMBEDDING_ADA_002;
 use crate::providers::openai::wire::{
-    AZURE, DOUBLEWORD, Dialect, GROQ, LLAMACPP, MISTRAL, OPENAI, OpenAIConfig, TOGETHER,
+    AZURE, DOUBLEWORD, Dialect, LLAMACPP, MISTRAL, OPENAI, OpenAIConfig, TOGETHER,
 };
-use crate::test_utils::RecordingHttpClient;
+use crate::test_utils::{RecordingHttpClient, json_body};
 
 /// The batch the embedding cassettes were recorded against.
 fn documents() -> Vec<String> {
@@ -84,51 +84,6 @@ async fn a_short_embedding_reply_fails_the_call() {
     );
 }
 
-/// An unstated width still goes on the wire, resolved from the model's
-/// documented dimensionality — which is what every recorded embedding
-/// cassette carries, and what `bound.embedding(model, None)` regressed on.
-#[test]
-fn an_unstated_width_resolves_from_the_model_table() {
-    let width = |model: &str, ndims: Option<usize>| -> Option<serde_json::Value> {
-        let encoded = OpenAIConfig::new("sk-test")
-            .embedding(model, ndims)
-            .encode(documents(), Mode::Unary)
-            .expect("the request encodes");
-        let request = &encoded.request;
-        let Body::Bytes(bytes) = request.body() else {
-            panic!("bytes")
-        };
-        let body: serde_json::Value = serde_json::from_slice(bytes).expect("JSON");
-        body.get("dimensions").cloned()
-    };
-
-    // The documented width, with the caller naming none.
-    assert_eq!(
-        width("text-embedding-3-small", None),
-        Some(serde_json::json!(1536))
-    );
-    assert_eq!(
-        width("text-embedding-3-large", None),
-        Some(serde_json::json!(3072))
-    );
-    // The caller's width wins over the table's.
-    assert_eq!(
-        width("text-embedding-3-small", Some(512)),
-        Some(serde_json::json!(512))
-    );
-    // A model absent from every table resolves to the unknown sentinel, and
-    // nothing is sent — the old `default_ndims` returning `None`.
-    assert_eq!(width("some-compatible-embedder", None), None);
-    // And OpenAI's legacy Ada model rejects the field outright.
-    assert_eq!(
-        width(
-            crate::providers::openai::embedding::TEXT_EMBEDDING_ADA_002,
-            None
-        ),
-        None
-    );
-}
-
 /// A requested width goes on the wire in the field the dialect spells it
 /// with — and the recorded request is what that looks like.
 #[test]
@@ -137,11 +92,7 @@ fn a_requested_width_matches_the_recorded_request() {
         .embedding("text-embedding-3-small", Some(512))
         .encode(documents(), Mode::Unary)
         .expect("the request encodes");
-    let request = &encoded.request;
-    let Body::Bytes(bytes) = request.body() else {
-        panic!("an embedding request body is bytes");
-    };
-    let body: serde_json::Value = serde_json::from_slice(bytes).expect("the body is JSON");
+    let body = json_body(&encoded.request);
     assert_eq!(
         body,
         recorded_json("when", "embedding_matrix/dimensions_request.yaml")
@@ -158,11 +109,7 @@ fn the_dialect_decides_the_width_field() {
             .embedding(model, Some(256))
             .encode(documents(), Mode::Unary)
             .expect("the request encodes");
-        let request = &encoded.request;
-        let Body::Bytes(bytes) = request.body() else {
-            panic!("bytes")
-        };
-        let body: serde_json::Value = serde_json::from_slice(bytes).expect("JSON");
+        let body = json_body(&encoded.request);
         ["dimensions", "output_dimension"]
             .into_iter()
             .find(|field| body.get(*field).is_some())
@@ -201,10 +148,7 @@ fn azure_sends_no_model_field() {
         request.uri().to_string(),
         "https://example.openai.azure.com/openai/deployments/my-deployment/embeddings?api-version=2024-10-21"
     );
-    let Body::Bytes(bytes) = request.body() else {
-        panic!("bytes")
-    };
-    let body: serde_json::Value = serde_json::from_slice(bytes).expect("JSON");
+    let body = json_body(request);
     assert!(body.get("model").is_none(), "{body}");
 }
 
@@ -259,23 +203,6 @@ async fn a_recorded_model_listing_decodes() {
     );
 }
 
-#[tokio::test]
-async fn a_listing_entry_keeps_the_limits_a_dialect_reports() {
-    let reply = r#"{"object":"list","data":[{"id":"llama-3.3-70b","object":"model","created":1,"owned_by":"Meta","context_window":131072,"max_completion_tokens":32768}]}"#;
-    let models = crate::driver::Model::new(
-        OpenAIConfig::with_key(&GROQ, "k").models(),
-        RecordingHttpClient::new(reply),
-    )
-    .list()
-    .await
-    .expect("the catalogue decodes");
-    let model = models.iter().next().expect("one entry");
-    assert_eq!(model.id, "llama-3.3-70b");
-    assert_eq!(model.owned_by.as_deref(), Some("Meta"));
-    assert_eq!(model.context_length, Some(131_072));
-    assert_eq!(model.max_output_tokens, Some(32_768));
-}
-
 /// The transcription body is multipart, with the model as a form field
 /// everywhere but Azure.
 #[test]
@@ -310,14 +237,6 @@ fn a_transcription_request_is_multipart() {
 
 // ── the dialect-specific modality bodies ────────────────────────────────
 
-fn json_body(encoded: &Encoded) -> serde_json::Value {
-    let request = &encoded.request;
-    let Body::Bytes(bytes) = request.body() else {
-        panic!("a JSON body is bytes")
-    };
-    serde_json::from_slice(bytes).expect("the body is JSON")
-}
-
 /// xAI's image endpoint takes no `size` and must be asked for base64, which
 /// is the only form this wire decodes.
 #[cfg(feature = "image")]
@@ -340,10 +259,7 @@ async fn the_xai_image_body_and_reply_differ_from_openais() {
         http_request.uri().to_string(),
         "https://api.x.ai/v1/images/generations"
     );
-    let Body::Bytes(bytes) = http_request.body() else {
-        panic!("bytes")
-    };
-    let body: serde_json::Value = serde_json::from_slice(bytes).expect("JSON");
+    let body = json_body(http_request);
     assert_eq!(body["response_format"], "b64_json");
     assert_eq!(body["aspect_ratio"], "1:1");
     assert!(body.get("size").is_none(), "xAI takes no `size`: {body}");
@@ -353,7 +269,7 @@ async fn the_xai_image_body_and_reply_differ_from_openais() {
         .image_generation("gpt-image-1")
         .encode(request(), Mode::Unary)
         .expect("encodes");
-    let openai_body = json_body(&openai);
+    let openai_body = json_body(&openai.request);
     assert_eq!(openai_body["size"], "1024x1024");
     assert!(openai_body.get("aspect_ratio").is_none());
 
@@ -389,7 +305,7 @@ fn the_xai_speech_body_differs_from_openais() {
         .expect("encodes");
     let http_request = &encoded.request;
     assert_eq!(http_request.uri().to_string(), "https://api.x.ai/v1/tts");
-    let body = json_body(&encoded);
+    let body = json_body(&encoded.request);
     assert_eq!(body["voice_id"], "nova");
     assert_eq!(body["text"], "hello");
     assert_eq!(body["language"], "en");
@@ -400,14 +316,14 @@ fn the_xai_speech_body_differs_from_openais() {
         .audio_generation("tts-1")
         .encode(request(""), Mode::Unary)
         .expect("encodes");
-    assert_eq!(json_body(&defaulted)["voice_id"], "eve");
+    assert_eq!(json_body(&defaulted.request)["voice_id"], "eve");
 
     // OpenAI's own body is the other shape, at the other path.
     let openai = OpenAIConfig::new("sk")
         .audio_generation("tts-1")
         .encode(request("nova"), Mode::Unary)
         .expect("encodes");
-    let body = json_body(&openai);
+    let body = json_body(&openai.request);
     assert_eq!(body["voice"], "nova");
     assert_eq!(body["input"], "hello");
     assert_eq!(body["model"], "tts-1");
@@ -500,27 +416,6 @@ async fn a_recorded_rerank_reply_folds_its_ranking() {
     );
 }
 
-/// The text-embeddings-inference shape the same llama.cpp handler switches to
-/// spells the score `score`; reading only `relevance_score` would score every
-/// document zero.
-#[tokio::test]
-async fn a_rerank_reply_accepts_either_score_key() {
-    let reply = r#"{"results":[{"index":0,"score":0.75}]}"#;
-    let response = crate::driver::Model::new(
-        OpenAIConfig::with_key(&LLAMACPP, "").rerank("r"),
-        RecordingHttpClient::new(reply),
-    )
-    .call(crate::operation::RerankRequest {
-        query: "q".to_owned(),
-        documents: vec!["a".to_owned()],
-    })
-    .await
-    .expect("the reply decodes");
-    assert_eq!(response.results[0].relevance_score, 0.75);
-    // A server that omits `model` still produced a ranking.
-    assert_eq!(response.model, None);
-}
-
 #[test]
 fn a_rerank_request_is_the_jina_shape() {
     let encoded = OpenAIConfig::with_key(&LLAMACPP, "")
@@ -536,7 +431,7 @@ fn a_rerank_request_is_the_jina_shape() {
         .expect("encodes");
     let request = &encoded.request;
     assert_eq!(request.uri().to_string(), "http://localhost:8080/v1/rerank");
-    let body = json_body(&encoded);
+    let body = json_body(&encoded.request);
     assert_eq!(
         body,
         serde_json::json!({
@@ -580,7 +475,7 @@ async fn the_hyperbolic_image_body_and_reply_differ_from_openais() {
         http_request.uri().to_string(),
         "https://api.hyperbolic.xyz/v1/image/generation"
     );
-    let body = json_body(&encoded);
+    let body = json_body(&encoded.request);
     assert_eq!(body["model_name"], "SDXL1.0-base");
     assert_eq!(body["width"], 1024);
     assert_eq!(body["height"], 768);
@@ -628,7 +523,7 @@ fn the_huggingface_image_body_is_the_routers_own_shape() {
         http_request.uri().to_string(),
         "https://router.huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers"
     );
-    let body = json_body(&encoded);
+    let body = json_body(&encoded.request);
     assert_eq!(body["inputs"], "a cat");
     assert_eq!(body["parameters"]["width"], 1024);
     assert_eq!(body["parameters"]["height"], 768);
@@ -694,7 +589,7 @@ async fn the_hyperbolic_speech_body_and_reply_differ_from_openais() {
         http_request.uri().to_string(),
         "https://api.hyperbolic.xyz/v1/audio/generation"
     );
-    let body = json_body(&encoded);
+    let body = json_body(&encoded.request);
     // The "model" handle IS the language tag.
     assert_eq!(body["language"], "EN");
     assert_eq!(body["speaker"], "EN-US");
@@ -725,23 +620,6 @@ async fn the_hyperbolic_speech_body_and_reply_differ_from_openais() {
     assert_eq!(openai.audio, b"ID3\x04raw-mp3");
 }
 
-/// Azure must never address an unversioned endpoint, so a configuration
-/// built without reading the environment still names a version.
-#[test]
-fn azure_always_carries_an_api_version() {
-    let provider = OpenAIConfig::with_key(&AZURE, "k").with_base_url("https://x.openai.azure.com");
-    assert_eq!(provider.api_version.as_deref(), Some("2024-10-21"));
-    assert!(
-        !provider
-            .uri("/chat/completions", Some("d"))
-            .ends_with("api-version="),
-        "an empty api-version would silently address the wrong API: {}",
-        provider.uri("/chat/completions", Some("d"))
-    );
-    // No other dialect invents one.
-    assert_eq!(OpenAIConfig::new("k").api_version, None);
-}
-
 /// The width a dialect's own table documents, and the field suppression that
 /// comes with it.
 ///
@@ -770,9 +648,9 @@ fn a_dialects_width_table_supplies_the_default_and_suppresses_the_field() {
             .encode(documents(), Mode::Unary)
             .expect("the native width encodes");
         assert!(
-            json_body(&encoded).get("dimensions").is_none(),
+            json_body(&encoded.request).get("dimensions").is_none(),
             "{}",
-            json_body(&encoded)
+            json_body(&encoded.request)
         );
     }
 
@@ -781,7 +659,10 @@ fn a_dialects_width_table_supplies_the_default_and_suppresses_the_field() {
         .embedding(QWEN3_EMBEDDING_8B, Some(512))
         .encode(documents(), Mode::Unary)
         .expect("a width inside the documented range encodes");
-    assert_eq!(json_body(&encoded)["dimensions"], serde_json::json!(512));
+    assert_eq!(
+        json_body(&encoded.request)["dimensions"],
+        serde_json::json!(512)
+    );
 
     // Mistral's fixed-width model is the same mechanism with a different
     // table: 1024 reported, and no `output_dimension` on the wire.
@@ -791,9 +672,11 @@ fn a_dialects_width_table_supplies_the_default_and_suppresses_the_field() {
         .encode(documents(), Mode::Unary)
         .expect("the native width encodes");
     assert!(
-        json_body(&encoded).get("output_dimension").is_none(),
+        json_body(&encoded.request)
+            .get("output_dimension")
+            .is_none(),
         "{}",
-        json_body(&encoded)
+        json_body(&encoded.request)
     );
 }
 
@@ -849,26 +732,8 @@ fn an_unhonourable_width_is_refused_before_the_request_is_built() {
     let encoded = unknown
         .encode(documents(), Mode::Unary)
         .expect("an undocumented model's width is not rig's to refuse");
-    assert_eq!(json_body(&encoded)["dimensions"], serde_json::json!(8_192));
-}
-
-/// A table-supplied default must not look like a caller's declaration.
-///
-/// The reply-side guard raises `MismatchedDimensions` only when the caller
-/// *declared* a width, so a width that came from the dialect's table has to
-/// leave `declared` alone — otherwise every reply would be measured against
-/// a number the caller never asked for.
-#[test]
-fn a_table_supplied_width_is_not_a_declaration() {
-    let unasked = OpenAIConfig::with_key(&DOUBLEWORD, "k").embedding(QWEN3_EMBEDDING_8B, None);
-    let capabilities = unasked.describe().capabilities;
-    assert_eq!(capabilities.ndims, 4_096, "the table resolves the width");
     assert_eq!(
-        capabilities.declared, None,
-        "the caller named no width, so there is nothing for a reply to contradict"
+        json_body(&encoded.request)["dimensions"],
+        serde_json::json!(8_192)
     );
-
-    // Declaring the same number is a different fact, and is recorded as one.
-    let asked = OpenAIConfig::with_key(&DOUBLEWORD, "k").embedding(QWEN3_EMBEDDING_8B, Some(4_096));
-    assert_eq!(asked.describe().capabilities.declared, Some(4_096));
 }

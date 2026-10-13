@@ -16,8 +16,9 @@ use rig_core::wire::{Capabilities, Decoder, Descriptor, Flow, Mode, Out, Wire, W
 use serde::{Deserialize, Serialize};
 
 use crate::client::BedrockRuntime;
-use crate::types::assistant_content::PROVIDER_NAME;
-use crate::types::errors::AwsSdkInvokeModelError;
+use crate::completion::PROVIDER_NAME;
+use crate::types::errors::sdk_error;
+use rig_core::Model;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,19 +35,33 @@ pub struct EmbeddingResponse {
     pub input_text_token_count: usize,
 }
 
-pub use crate::completion::{
-    AMAZON_TITAN_EMBEDDINGS_G1_TEXT as AMAZON_TITAN_EMBED_TEXT_V1,
-    AMAZON_TITAN_MULTIMODAL_EMBEDDINGS_G1 as AMAZON_TITAN_EMBED_IMAGE_V1,
-    AMAZON_TITAN_TEXT_EMBEDDINGS_V2 as AMAZON_TITAN_EMBED_TEXT_V2_0,
-    COHERE_EMBED_ENGLISH as COHERE_EMBED_ENGLISH_V3,
-    COHERE_EMBED_MULTILINGUAL as COHERE_EMBED_MULTILINGUAL_V3,
-};
+/// `amazon.titan-embed-text-v1`
+pub const AMAZON_TITAN_EMBED_TEXT_V1: &str = "amazon.titan-embed-text-v1";
+/// `amazon.titan-embed-image-v1` multimodal embedding model
+pub const AMAZON_TITAN_EMBED_IMAGE_V1: &str = "amazon.titan-embed-image-v1";
+/// `amazon.titan-embed-text-v2:0`
+pub const AMAZON_TITAN_EMBED_TEXT_V2_0: &str = "amazon.titan-embed-text-v2:0";
+/// `cohere.embed-english-v3`
+pub const COHERE_EMBED_ENGLISH_V3: &str = "cohere.embed-english-v3";
+/// `cohere.embed-multilingual-v3`
+pub const COHERE_EMBED_MULTILINGUAL_V3: &str = "cohere.embed-multilingual-v3";
 
 /// The embedding endpoint for one model, at a caller-chosen width.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Embeddings {
     pub model: String,
     pub ndims: Option<usize>,
+}
+
+impl BedrockRuntime {
+    /// The embedding model for `model`, `ndims` wide when set.
+    pub fn embedding(
+        &self,
+        model: impl Into<String>,
+        ndims: Option<usize>,
+    ) -> Model<Embeddings, Self> {
+        Model::new(Embeddings::new(model, ndims), self.clone())
+    }
 }
 
 impl Embeddings {
@@ -79,6 +94,7 @@ impl Wire for Embeddings {
     type Payload = EmbeddingBatch;
     type Frame = EmbeddingFrame;
     type Decoder<'id> = EmbeddingsDecoder;
+    type Reassembler = rig_core::wire::document::Unreassembled;
 
     fn describe(&self) -> Descriptor<'_> {
         Descriptor::new(PROVIDER_NAME)
@@ -131,7 +147,7 @@ impl Transport<Embeddings> for BedrockRuntime {
                     .send()
                     .await;
                 let reply = sent
-                    .map_err(|sdk_error| ProviderError::from(AwsSdkInvokeModelError(sdk_error)))
+                    .map_err(sdk_error)
                     .and_then(|response| {
                         String::from_utf8(response.body.into_inner())
                             .map_err(|error| ProviderError::Response(error.to_string()))
@@ -178,11 +194,9 @@ impl<'id> Decoder<'id, rig_core::operation::Embedding, EmbeddingFrame> for Embed
             }
         };
         let tokens = response.input_text_token_count as u64;
-        self.usage += rig_core::completion::Usage {
-            input_tokens: Some(tokens),
-            total_tokens: Some(tokens),
-            ..Default::default()
-        };
+        self.usage += rig_core::completion::Usage::new()
+            .input_tokens(tokens)
+            .total_tokens(tokens);
         self.raw.push(serde_json::to_value(&response)?);
         self.embeddings.push(Embedding {
             document,

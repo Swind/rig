@@ -19,7 +19,8 @@ More information about this crate can be found in the [crate documentation](http
 - Full [GenAI Semantic Convention](https://opentelemetry.io/docs/specs/semconv/gen-ai/) compatibility
 - 20+ model providers, all under one singular unified interface
 - Cached context and output limits from models.dev through `model::models_dev::ModelsDev`, using a caller-supplied HTTP transport.
-- Built-in providers selectable as data: `providers::registry` names a vendor and a protocol family (`deepseek/openai:deepseek-chat`) or carries a whole typed configuration, and both round-trip through serde without a credential. Model references discard embedded credentials and reject empty identifiers; a configuration's `id()` returns a catalog selection only when its dialect name is registered. Providers outside this catalog can use a `Model` and `ModelAdapter` directly.
+- Built-in providers selectable as data: `Catalog::connect("anthropic/claude-opus-5-5")` builds a model from a `vendor/model` reference with the key from the environment, in the protocol family the model catalog names, and the model encodes and prices with that catalog's facts. `providers::registry` references name a model or carry a whole typed configuration, and both round-trip through serde without a credential. Model references discard embedded credentials and reject empty identifiers; a configuration's `id()` returns a catalog selection only when its dialect name is registered. Providers outside this catalog can use a `Model` and `ModelAdapter` directly.
+- A model catalog an application can correct: lay a fetched copy of models.dev (`Catalog::from_models_dev`, which skips what it cannot read) and the user's override file (`Catalog::from_overrides`, which rejects a misspelt vendor, field or model id with a "did you mean" hint) over `Catalog::builtin()` with `with_models_dev` (which keeps rig's hand-reviewed facts) and `with_overrides`, and connect through the result.
 - 10+ vector store integrations, all under one singular unified interface
 - Parameterized Cypher execution through `cypher::CypherQuery`, with JSON-projected rows and backend-specific syntax. Statements may read or modify data; unsupported parameter or result values return conversion errors.
 - Search saved conversation excerpts through `conversation_search::ConversationSearch` and the built-in `search_conversations` tool, using an application-supplied backend.
@@ -133,6 +134,10 @@ Rig supports the following LLM providers out of the box:
 - xAI
 - Xiaomi MiMo
 - Z.ai
+
+The built-in `rig_core::vector_store::in_memory_store::InMemoryVectorStore`
+stores serializable documents without requiring `Eq` or `Default`. Its custom
+ID callbacks accept closures that capture and mutate application state.
 
 Vector stores are available as separate companion-crates and as feature-gated modules on the root `rig` facade:
 
@@ -348,6 +353,5 @@ otherwise-empty frames still count. Corrupt-frame ordinals start at one using
 the same counting rule. `TransportEof`
 records body completeness independently: a provider terminal followed by
 an incomplete trailing frame retains both its terminal closure and partial
-EOF evidence. The context does not promise cross-execution identity. The ECS completion adapter
-forwards its driver's context when the invocation supplies no explicit context. Response bodies and
+EOF evidence. The context does not promise cross-execution identity. Response bodies and
 credentials are not copied into these boundary facts.

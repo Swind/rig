@@ -22,7 +22,6 @@
 //! The invariant is ported from `inspirations/pydantic-ai`
 //! (`tests/cassette_utils.py` `check_cache_prefix_stability`); the plumbing is
 //! rig's.
-#![allow(dead_code)]
 
 use serde_json::Value;
 
@@ -77,16 +76,15 @@ pub fn canonical_prefix_blocks(path: &str, body: &Value) -> Option<Vec<PrefixBlo
     } else if path.ends_with("/chat/completions") {
         add("tools", body.get("tools"));
         add("messages", body.get("messages"));
+    } else if path.ends_with("/api/chat") {
+        // Ollama. Carries its system prompt as a `system`-role entry inside
+        // `messages`, like the OpenAI-compatible wires.
+        add("tools", body.get("tools"));
+        add("messages", body.get("messages"));
     } else if path.ends_with("/responses") {
         add("tools", body.get("tools"));
         add("instructions", body.get("instructions"));
         add("input", body.get("input"));
-    } else if path.ends_with("/v2/chat") {
-        // Cohere Chat v2. Tools render ahead of the message list; Cohere carries
-        // its system prompt as a `system`-role entry inside `messages`, so there
-        // is no separate instruction field to model.
-        add("tools", body.get("tools"));
-        add("messages", body.get("messages"));
     } else if path.contains("/converse") {
         // Bedrock Converse (`/model/<id>/converse`, `/converse-stream`).
         //
@@ -100,11 +98,6 @@ pub fn canonical_prefix_blocks(path: &str, body: &Value) -> Option<Vec<PrefixBlo
                 .and_then(|config| config.get("tools")),
         );
         add("system", body.get("system"));
-        add("messages", body.get("messages"));
-    } else if path.ends_with("/api/chat") {
-        // Ollama. Carries its system prompt as a `system`-role entry inside
-        // `messages`, like the OpenAI-compatible wires.
-        add("tools", body.get("tools"));
         add("messages", body.get("messages"));
     } else {
         return None;
@@ -129,14 +122,14 @@ pub fn splice_cached_content(body: &Value, cache: &Value) -> Option<Value> {
     body.get("cachedContent")?.as_str()?;
     let mut spliced = body.clone();
     let object = spliced.as_object_mut()?;
-    object.remove("cachedContent");
+    object.shift_remove("cachedContent");
     for key in ["systemInstruction", "tools", "toolConfig"] {
         match cache.get(key) {
             Some(value) => {
                 object.insert(key.to_owned(), value.clone());
             }
             None => {
-                object.remove(key);
+                object.shift_remove(key);
             }
         }
     }
@@ -440,7 +433,7 @@ fn finished_turn_lost_its_signatures(
     let mut removed = false;
     for part in parts {
         if let Some(part) = part.as_object_mut() {
-            removed |= part.remove("thoughtSignature").is_some();
+            removed |= part.shift_remove("thoughtSignature").is_some();
         }
     }
     let user_text_follows = later_blocks

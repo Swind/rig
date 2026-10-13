@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 17063702180001451641,
+    "run_spec": 17304775086552656482,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -91,9 +91,7 @@
             {
               "type": "toolcall",
               "id": {
-                "provider": {
-                  "call_id": "call-1"
-                }
+                "provider": "call-1"
               },
               "function": {
                 "name": "final_result",
@@ -102,20 +100,18 @@
                   "category": "Technology",
                   "summary": "A meetup."
                 }
-              },
-              "signature": null,
-              "additional_params": null
+              }
             }
           ],
           "usage": {},
-          "message_id": null,
-          "response_id": null,
+          "origin": {
+            "api": "mock.script",
+            "provider": "mock",
+            "model": "mock-model"
+          },
           "finish_reason": null,
-          "provider": "mock",
-          "model": null,
           "raw": {
             "usage": {},
-            "message_id": null,
             "response_id": null,
             "model": null
           }
@@ -127,7 +123,8 @@
           "value": {
             "event": "start",
             "part": 0,
-            "kind": "tool_call"
+            "kind": "tool_call",
+            "name": "final_result"
           }
         },
         {
@@ -135,7 +132,15 @@
           "value": {
             "event": "arguments",
             "part": 0,
-            "json": "{\"title\": \"Seattle Rust Meetup\", \"category\": \"Technology\", \"summary\": \"A meetup.\"}"
+            "json": "{\"title\": \"Seattle Rust Meetup\", \"category\": \"Technology\", "
+          }
+        },
+        {
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "\"summary\": \"A meetup.\"}"
           }
         },
         {
@@ -146,9 +151,7 @@
             "content": {
               "type": "toolcall",
               "id": {
-                "provider": {
-                  "call_id": "call-1"
-                }
+                "provider": "call-1"
               },
               "function": {
                 "name": "final_result",
@@ -157,13 +160,16 @@
                   "category": "Technology",
                   "summary": "A meetup."
                 }
-              },
-              "signature": null,
-              "additional_params": null
+              }
             }
           }
         }
-      ]
+      ],
+      "stream_origin": {
+        "api": "mock.script",
+        "provider": "mock",
+        "model": "mock-model"
+      }
     }
   ]
 }

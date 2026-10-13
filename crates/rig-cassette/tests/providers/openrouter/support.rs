@@ -48,12 +48,34 @@ where
     let (cassette, bound) = openrouter_cassette(spec).await;
     let result = AssertUnwindSafe(test_body(OpenAiModels::new(
         bound,
-        rig::rig_reqwest::shared(),
+        rig_test_support::cassettes::local_http(),
     )))
     .catch_unwind()
     .await;
     crate::cassettes::checkpoint_attempt(&cassette, "openrouter", spec.scenario()).await;
     cassette.finish_after_test(result).await;
+}
+
+/// [`with_openrouter_cassette`], with `check` run on what the session
+/// recorded before the recording is written (`cassettes::finish_checked`).
+pub(super) async fn with_openrouter_checked_cassette<F, Fut>(
+    spec: impl Into<CassetteSpec>,
+    test_body: F,
+    check: impl FnOnce(&std::path::Path, &str),
+) where
+    F: FnOnce(OpenAiModels) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let spec = spec.into();
+    let (cassette, bound) = openrouter_cassette(spec).await;
+    let result = AssertUnwindSafe(test_body(OpenAiModels::new(
+        bound,
+        rig_test_support::cassettes::local_http(),
+    )))
+    .catch_unwind()
+    .await;
+    crate::cassettes::checkpoint_attempt(&cassette, "openrouter", spec.scenario()).await;
+    crate::cassettes::finish_checked(cassette, "openrouter", spec.scenario(), result, check).await;
 }
 
 pub(super) async fn with_openrouter_cassette_result<F, Fut, E>(
@@ -67,7 +89,7 @@ where
     let (cassette, bound) = openrouter_cassette(spec).await;
     let result = AssertUnwindSafe(test_body(OpenAiModels::new(
         bound,
-        rig::rig_reqwest::shared(),
+        rig_test_support::cassettes::local_http(),
     )))
     .catch_unwind()
     .await;
@@ -84,42 +106,11 @@ pub(super) async fn with_openrouter_openai_cassette<F, Fut>(
     let (cassette, bound) = openrouter_openai_cassette(spec).await;
     let result = AssertUnwindSafe(test_body(OpenAiModels::new(
         bound,
-        rig::rig_reqwest::shared(),
+        rig_test_support::cassettes::local_http(),
     )))
     .catch_unwind()
     .await;
     cassette.finish_after_test(result).await;
-}
-
-/// Bogus-key variant for recording real 401s: the shared model-listing fetch
-/// must classify a rejected listing with provider, path and status context
-/// (rig#2079), and only a real rejection proves it.
-pub(super) async fn with_openrouter_cassette_bogus_key_result<F, Fut, E>(
-    spec: impl Into<CassetteSpec>,
-    test_body: F,
-) -> Result<(), E>
-where
-    F: FnOnce(OpenAiModels) -> Fut,
-    Fut: Future<Output = Result<(), E>>,
-{
-    let cassette = ProviderCassette::start(
-        &crate::cassettes::cassette_root(),
-        "openrouter",
-        spec,
-        OPENROUTER_BASE_URL,
-    )
-    .await;
-    // The rejected credential is this wrapper's subject.
-    cassette.expect_account_failure(crate::cassettes::AccountFailure::Auth);
-    let bound = OpenAIConfig::with_key(&OPENROUTER, "sk-invalid-edge-matrix-key")
-        .with_base_url(cassette.base_url());
-    let result = AssertUnwindSafe(test_body(OpenAiModels::new(
-        bound,
-        rig::rig_reqwest::shared(),
-    )))
-    .catch_unwind()
-    .await;
-    cassette.finish_after_test_result(result).await
 }
 
 /// Refusal edge matrix (`refusal_matrix/*`): a structured-output refusal
@@ -150,18 +141,6 @@ pub(super) async fn with_openrouter_usage_cassette<F, Fut>(
 
 /// Live-recorded native OpenRouter log-probability transport matrix.
 pub(super) async fn with_openrouter_stream_logprobs_cassette_result<F, Fut, E>(
-    spec: impl Into<CassetteSpec>,
-    test_body: F,
-) -> Result<(), E>
-where
-    F: FnOnce(OpenAiModels) -> Fut,
-    Fut: Future<Output = Result<(), E>>,
-{
-    with_openrouter_cassette_result(spec, test_body).await
-}
-
-/// Live-recorded malformed/truncated tool-call contract matrix.
-pub(super) async fn with_openrouter_tool_truncation_cassette_result<F, Fut, E>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
 ) -> Result<(), E>
@@ -236,4 +215,22 @@ pub(super) async fn with_openrouter_prompt_caching_cassette<F, Fut>(
     Fut: Future<Output = ()>,
 {
     with_openrouter_cassette(spec, test_body).await;
+}
+
+/// `options` as the typed provider options of an OpenRouter request.
+pub(super) fn openrouter_options(
+    options: rig::providers::openrouter::extension::OpenRouterOptions,
+) -> rig::completion::ProviderOptions {
+    rig::completion::ProviderOptions::new().set(options)
+}
+
+/// Provider preferences that pin `providers`, in order, with no fallback.
+pub(super) fn pinned_order(providers: &[&str]) -> rig::completion::ProviderOptions {
+    openrouter_options(
+        rig::providers::openrouter::extension::OpenRouterOptions::new().provider(
+            rig::providers::openrouter::extension::ProviderPreferences::new()
+                .order(providers.iter().copied())
+                .allow_fallbacks(false),
+        ),
+    )
 }

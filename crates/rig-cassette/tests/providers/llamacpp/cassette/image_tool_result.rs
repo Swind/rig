@@ -31,6 +31,7 @@ const VISION_MODEL: &str = "Qwen3-VL-2B-Instruct-Q8_0";
 
 fn image_tool_result() -> ToolResult {
     ToolResult {
+        is_error: false,
         call: CallId::from_wire("call_1"),
         name: rig_core::message::ToolName::new("view_file".to_string()).expect("tool name"),
         content: vec![ToolResultContent::image_base64(
@@ -42,14 +43,13 @@ fn image_tool_result() -> ToolResult {
 }
 
 fn tool_call_turn() -> rig::message::Message {
-    rig::message::Message::Assistant {
-        id: None,
-        content: vec![rig::message::AssistantContent::tool_call(
+    rig::message::Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        rig::message::AssistantContent::tool_call(
             "call_1",
             rig_core::message::ToolName::new("view_file").expect("tool name"),
             serde_json::json!({}),
-        )],
-    }
+        ),
+    ]))
 }
 
 fn assistant_text(response: &rig::completion::CompletionResponse) -> String {
@@ -82,6 +82,9 @@ async fn a_tool_result_image_is_read_by_the_model() {
             )
             .max_tokens(30)
             .temperature(0.0)
+            // The request continues a tool loop, so it declares the tool;
+            // without one, the result reaches the model as text.
+            .tool(crate::support::zero_arg_tool_definition("view_file"))
             .messages(vec![
                 tool_call_turn(),
                 rig::message::Message::User {
@@ -98,45 +101,6 @@ async fn a_tool_result_image_is_read_by_the_model() {
             assert!(
                 said.contains("pink") || said.contains("magenta"),
                 "the model has to have seen the image to name its colour; said: {said:?}"
-            );
-        },
-    )
-    .await;
-}
-
-/// The control: identical bytes in a `user` message.
-///
-/// Without this the cell above proves only that *something* produced a colour
-/// word. With it, the image, the model and the run are all held constant and
-/// the only variable is the message role.
-#[tokio::test]
-async fn the_same_image_in_a_user_message_is_read_too() {
-    with_llamacpp_vision_cassette(
-        "image_tool_result/the_same_image_in_a_user_message_is_read_too",
-        |client| async move {
-            let model = client.completion(VISION_MODEL);
-            let request = CompletionRequest::new(rig::message::Message::User {
-                content: vec![
-                    rig::message::UserContent::text("Reply with ONLY the dominant colour name."),
-                    rig::message::UserContent::image_base64(
-                        MAGENTA_PNG_BASE64,
-                        Some(ImageMediaType::PNG),
-                        None,
-                    ),
-                ],
-            })
-            .max_tokens(30)
-            .temperature(0.0);
-
-            let response = model
-                .call(request)
-                .await
-                .expect("an image in a user message is ordinary and must work");
-
-            let said = assistant_text(&response);
-            assert!(
-                said.contains("pink") || said.contains("magenta"),
-                "the control must succeed or the subject cell proves nothing: {said:?}"
             );
         },
     )

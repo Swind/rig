@@ -16,6 +16,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    completion::UnsupportedOption,
     http_client,
     memory::MemoryError,
     observe::AdapterErrorBoundary,
@@ -120,7 +121,7 @@ pub struct ErrorReport {
     /// A provider- or tool-specific machine code, when one was reported:
     /// for a provider's reply, the transport's own code when it gave one
     /// apart from the body, else the code the body names
-    /// (`provider_response::body_code`).
+    /// ([`ProviderResponseError::machine_code`]).
     pub code: Option<String>,
     /// The HTTP status, when the failure had one.
     pub http_status: Option<u16>,
@@ -136,36 +137,6 @@ pub struct ErrorReport {
     /// headers, and request ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_response: Option<crate::provider_response::ProviderResponseError>,
-    /// Structured diagnostic for failures a consumer may want to *route*
-    /// rather than only display. Absent for the common case; see
-    /// [`ErrorDetail`] for what each variant carries and why.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<ErrorDetail>,
-}
-
-/// Optional structured recovery diagnostic supplementing a report's kind and message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "detail", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ErrorDetail {
-    /// A tool block declared complete contained invalid JSON, rather than
-    /// truncated input. Carries exact accumulated arguments and the parser
-    /// error for recovery or replay.
-    MalformedToolInput(MalformedToolInput),
-}
-
-/// The payload of [`ErrorDetail::MalformedToolInput`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MalformedToolInput {
-    /// The tool the model named.
-    pub name: String,
-    /// The call's id, retained for recovery actions, including tool results
-    /// and rollback.
-    pub id: crate::message::CallId,
-    /// The raw argument text, byte-for-byte as accumulated.
-    pub raw: String,
-    /// The JSON parser's description of what was wrong.
-    pub error: String,
 }
 
 impl ErrorReport {
@@ -181,7 +152,6 @@ impl ErrorReport {
             source_chain: Vec::new(),
             request_id: None,
             provider_response: None,
-            detail: None,
         }
     }
 
@@ -212,12 +182,6 @@ impl ErrorReport {
     /// Attach the provider's request id.
     pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request_id = Some(request_id.into());
-        self
-    }
-
-    /// Attach a typed diagnostic.
-    pub fn with_detail(mut self, detail: ErrorDetail) -> Self {
-        self.detail = Some(detail);
         self
     }
 
@@ -355,6 +319,7 @@ pub type SharedError = Arc<dyn std::error::Error + 'static>;
 ///
 /// Errors are `Clone`: sources are shared, so a stream that already yielded
 /// an error can hand the same error to a later caller.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum ProviderError {
     /// A transport failure that produced no provider reply: a reset
@@ -369,7 +334,10 @@ pub enum ProviderError {
     Request(SharedError),
     /// The reply decoded but does not answer the request.
     Response(String),
-    /// The provider reported a failure without a preserved reply.
+    /// The provider reported a failure without a preserved reply: a Rig
+    /// diagnostic, never classified as retryable. A provider's own error
+    /// payload belongs in [`Self::ProviderResponse`], whose envelope decides
+    /// its code and retry verdict; never put provider JSON here.
     Provider(String),
     /// The provider's reply, preserved: a non-success status with its body, a
     /// 2xx error envelope, or a non-HTTP transport's error payload.
@@ -396,18 +364,16 @@ pub enum ProviderError {
         /// Width the provider actually returned.
         returned: usize,
     },
-    /// A tool block the provider declared complete carried input that is
-    /// not valid JSON. Its report carries the input as
-    /// [`ErrorDetail::MalformedToolInput`].
-    MalformedToolInput(MalformedToolInput),
     /// A failure a relay delivered as its report, such as a stream relayed
     /// over the effect bus. It reports as the relayed report, unchanged.
     Relayed(Box<ErrorReport>),
     /// The reply stopped before the provider ended it: its frames ran out,
     /// or the runtime stopped, without the provider's end.
     Truncated,
-    /// The provider named two tool calls of one reply with the same id.
-    DuplicateCallId(crate::message::CallId),
+    /// A [`GenerationOptions`](crate::completion::GenerationOptions) field
+    /// the wire or model cannot honour, under
+    /// [`OnUnsupported::Error`](crate::completion::OnUnsupported::Error).
+    UnsupportedOption(UnsupportedOption),
 }
 
 impl fmt::Display for ProviderError {
@@ -438,18 +404,11 @@ impl fmt::Display for ProviderError {
                  model was created with {requested} dimensions; this provider does not resize \
                  embeddings"
             ),
-            Self::MalformedToolInput(input) => write!(
-                f,
-                "tool call `{}` arrived with malformed JSON input: {}",
-                input.name, input.error
-            ),
             Self::Relayed(report) => f.write_str(&report.message),
             Self::Truncated => {
                 f.write_str("ResponseError: the reply ended before the provider ended it")
             }
-            Self::DuplicateCallId(id) => {
-                write!(f, "ResponseError: the provider named two tool calls `{id}`")
-            }
+            Self::UnsupportedOption(option) => write!(f, "RequestError: {option}"),
         }
     }
 }
@@ -486,9 +445,9 @@ impl ProviderError {
     }
 
     /// Preserves a verbatim provider error body with no HTTP status as
-    /// [`Self::ProviderResponse`].
+    /// [`Self::ProviderResponse`] (see [`ProviderResponseError::from_body`]).
     pub fn from_provider_body(body: impl Into<String>) -> Self {
-        Self::ProviderResponse(ProviderResponseError::without_status(body))
+        Self::ProviderResponse(ProviderResponseError::from_body(body))
     }
 
     /// Converts a non-success reply the transport reported as an error to
@@ -511,12 +470,10 @@ impl ProviderError {
             Self::Http(_) => ErrorKind::Http,
             Self::Json(_) => ErrorKind::Json,
             Self::Url(_) => ErrorKind::Url,
-            Self::Request(_) => ErrorKind::Request,
-            Self::Response(_)
-            | Self::MismatchedDimensions { .. }
-            | Self::MalformedToolInput(_)
-            | Self::Truncated
-            | Self::DuplicateCallId(_) => ErrorKind::Response,
+            Self::Request(_) | Self::UnsupportedOption(_) => ErrorKind::Request,
+            Self::Response(_) | Self::MismatchedDimensions { .. } | Self::Truncated => {
+                ErrorKind::Response
+            }
             Self::Provider(_) => ErrorKind::Provider,
             Self::ProviderResponse(_)
             | Self::InvalidAuthentication(_)
@@ -705,8 +662,10 @@ impl From<http_client::Error> for ProviderError {
 
 /// A failure to build a provider request, returned by
 /// [`Wire::encode`](crate::wire::Wire::encode). It converts only into
-/// [`ProviderError::Request`], so every provider classifies its encode
+/// [`ProviderError::Request`] or [`ProviderError::UnsupportedOption`], both
+/// of kind [`ErrorKind::Request`], so every provider classifies its encode
 /// failures alike.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
 pub struct EncodeError(ProviderError);
@@ -715,6 +674,19 @@ impl EncodeError {
     /// A request that could not be built, for the given reason.
     pub fn request(reason: impl Into<BoxError>) -> Self {
         Self(ProviderError::request(reason))
+    }
+
+    /// A request that sets an option the wire or model cannot honour.
+    pub fn unsupported(option: UnsupportedOption) -> Self {
+        Self(ProviderError::UnsupportedOption(option))
+    }
+
+    /// The refused option, when this error is a refusal.
+    pub fn unsupported_option(&self) -> Option<&UnsupportedOption> {
+        match &self.0 {
+            ProviderError::UnsupportedOption(option) => Some(option),
+            _ => None,
+        }
     }
 }
 
@@ -773,12 +745,6 @@ impl From<&ProviderError> for ErrorReport {
             source_chain: source_chain(error),
             request_id: response.and_then(|response| response.provider_request_id.clone()),
             provider_response: response.cloned(),
-            detail: match error {
-                ProviderError::MalformedToolInput(input) => {
-                    Some(ErrorDetail::MalformedToolInput(input.clone()))
-                }
-                _ => None,
-            },
         }
     }
 }
@@ -820,7 +786,6 @@ impl From<&ToolExecutionError> for ErrorReport {
             source_chain: source_chain(error),
             request_id: None,
             provider_response: None,
-            detail: None,
         }
     }
 }
@@ -828,6 +793,48 @@ impl From<&ToolExecutionError> for ErrorReport {
 impl From<ToolExecutionError> for ErrorReport {
     fn from(error: ToolExecutionError) -> Self {
         Self::from(&error)
+    }
+}
+
+/// Rebuilds a tool failure from a dispatch report.
+///
+/// An [`ErrorKind::Tool`] report keeps its tool kind; other kinds map to the
+/// closest [`ToolErrorKind`]. Retryability, code, HTTP status, and refusal are
+/// copied, the message is model-visible, and the report is the `source()`.
+impl From<ErrorReport> for ToolExecutionError {
+    fn from(report: ErrorReport) -> Self {
+        let kind = match report.kind {
+            ErrorKind::Tool(kind) => kind,
+            ErrorKind::Timeout => ToolErrorKind::Timeout,
+            ErrorKind::Cancelled => ToolErrorKind::Cancelled,
+            ErrorKind::Denied => ToolErrorKind::PermissionDenied,
+            ErrorKind::HandlerUnavailable => ToolErrorKind::NotFound,
+            ErrorKind::Http => ToolErrorKind::Network,
+            ErrorKind::Provider | ErrorKind::ProviderResponse => ToolErrorKind::Provider,
+            ErrorKind::Json
+            | ErrorKind::Url
+            | ErrorKind::Request
+            | ErrorKind::Response
+            | ErrorKind::MemoryBackend
+            | ErrorKind::MemoryPolicy
+            | ErrorKind::Internal
+            | ErrorKind::BusClosed
+            | ErrorKind::Divergence
+            | ErrorKind::Other => ToolErrorKind::Other,
+        };
+        let mut error = if report.refusal {
+            ToolExecutionError::refused(report.message.clone())
+        } else {
+            ToolExecutionError::new(kind, report.message.clone())
+        }
+        .with_retryable(report.retryable);
+        if let Some(code) = &report.code {
+            error = error.with_code(code.clone());
+        }
+        if let Some(status) = report.http_status {
+            error = error.with_http_status(status);
+        }
+        error.with_source(report)
     }
 }
 
@@ -855,7 +862,6 @@ impl From<&MemoryError> for ErrorReport {
             source_chain: source_chain(error),
             request_id: None,
             provider_response: None,
-            detail: None,
         }
     }
 }
@@ -878,7 +884,7 @@ impl From<&VectorStoreError> for ErrorReport {
             }
             VectorStoreError::JsonError(_) => (ErrorKind::Json, None),
             VectorStoreError::DatastoreError(_) => (ErrorKind::Provider, None),
-            VectorStoreError::FilterError(_) | VectorStoreError::BuilderError(_) => {
+            VectorStoreError::FilterError(_) | VectorStoreError::SamplesOutOfRange { .. } => {
                 (ErrorKind::Request, None)
             }
             VectorStoreError::MissingIdError(_) => (ErrorKind::Response, None),
@@ -925,7 +931,6 @@ impl From<&VectorStoreError> for ErrorReport {
             source_chain: source_chain(error),
             request_id: None,
             provider_response,
-            detail: None,
         }
     }
 }

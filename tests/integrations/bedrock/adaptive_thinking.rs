@@ -2,7 +2,6 @@
 
 use futures::StreamExt;
 use rig::agent::AgentBuilder;
-use rig::bedrock::completion::Converse;
 use rig::completion::AssistantContent;
 use rig::streaming::StreamEvent;
 use serde_json::json;
@@ -25,8 +24,11 @@ fn adaptive_thinking_params() -> serde_json::Value {
 #[ignore = "requires AWS credentials and Bedrock Anthropic adaptive-thinking model access"]
 async fn adaptive_thinking_prompt_caching_tool_roundtrip_regression() {
     let model = client().completion(anthropic_adaptive_model());
-    let model = rig::Model::new(Converse::with_prompt_caching(model.wire), model.transport);
+    // A checkpoint after the reasoning turn is refused by default; this
+    // round trip skips it with a warning and checks the rest still works.
     let agent = AgentBuilder::new(model)
+        .cache(rig::completion::CacheRetention::Short)
+        .on_unsupported(rig::completion::OnUnsupported::Ignore)
         .preamble(
             "You must call tools when the user asks for their result. \
              After a tool result is available, answer with the exact result.",
@@ -40,7 +42,7 @@ async fn adaptive_thinking_prompt_caching_tool_roundtrip_regression() {
         .prompt("Call `lookup_harbor_label` exactly once, then answer with the exact tool output.")
         .await
         .expect("adaptive-thinking prompt-caching tool roundtrip should succeed")
-        .output;
+        .output();
 
     assert_contains_all_case_insensitive(&response, &[ALPHA_SIGNAL_OUTPUT]);
 }
@@ -62,15 +64,17 @@ async fn streaming_emits_signature_only_adaptive_reasoning_regression() {
 
     while let Some(item) = stream.next().await {
         if let rig::streaming::Item::Event(StreamEvent::End {
-            content: AssistantContent::Reasoning(reasoning),
+            content: content @ AssistantContent::Reasoning(_),
             ..
         }) = item.expect("adaptive-thinking Bedrock stream item should succeed")
         {
             reasoning_chunks += 1;
-            let reasoning = reasoning.open(reasoning.issuer()).expect("reasoning opens");
-            if reasoning.first_signature().is_some() {
+            let signed = content
+                .native_item()
+                .is_some_and(|item| item.get("signature").is_some());
+            if signed {
                 signature_chunks += 1;
-                if reasoning.display_text().is_empty() {
+                if matches!(&content, AssistantContent::Reasoning(r) if r.text.is_empty()) {
                     signature_only_chunks += 1;
                 }
             }

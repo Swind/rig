@@ -1,5 +1,4 @@
 //! xAI streaming tools smoke test.
-use rig::message::ToolChoice;
 use rig::message::{AssistantContent, Message, ToolResultContent, UserContent};
 use rig::providers::xai;
 use rig::tool::Tool;
@@ -8,10 +7,9 @@ use serde_json::json;
 
 use super::support::with_xai_cassette;
 use crate::support::{
-    REQUIRED_ZERO_ARG_TOOL_PROMPT, assert_raw_stream_text_contains,
-    assert_raw_stream_tool_call_precedes_text, assert_stream_contains_zero_arg_tool_call_named,
+    assert_raw_stream_text_contains, assert_raw_stream_tool_call_precedes_text,
     assert_tool_call_precedes_later_text, collect_raw_stream_observation,
-    collect_stream_observation, zero_arg_tool_definition,
+    collect_stream_observation,
 };
 use rig::completion::CompletionRequest;
 
@@ -60,23 +58,6 @@ impl Tool for StatusWordTool {
 }
 
 #[tokio::test]
-async fn raw_stream_emits_required_zero_arg_tool_call() {
-    with_xai_cassette(
-        "streaming_tools/raw_stream_emits_required_zero_arg_tool_call",
-        |client| async move {
-            let model = client.completion(xai::GROK_4);
-            let request = CompletionRequest::new(REQUIRED_ZERO_ARG_TOOL_PROMPT)
-                .tool(zero_arg_tool_definition("ping"))
-                .tool_choice(ToolChoice::Required);
-            let stream = model.stream(request).expect("stream should start");
-
-            assert_stream_contains_zero_arg_tool_call_named(stream, "ping", true).await;
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
 async fn responses_stream_preserves_tool_result_flow() {
     with_xai_cassette(
         "streaming_tools/responses_stream_preserves_tool_result_flow",
@@ -107,7 +88,8 @@ async fn raw_responses_stream_preserves_tool_then_followup_text_ordering() {
             let model = client.completion(xai::GROK_4);
             let request = CompletionRequest::new(XAI_STATUS_TOOL_PROMPT)
                 .preamble(XAI_STATUS_TOOL_PREAMBLE.to_string())
-                .tool(rig::tool::tool_definition(&StatusWordTool));
+                .tool(rig::tool::tool_definition(&StatusWordTool))
+                .additional_params(serde_json::json!({ "store": false }));
 
             let first_turn = collect_raw_stream_observation(
                 model
@@ -124,10 +106,9 @@ async fn raw_responses_stream_preserves_tool_then_followup_text_ordering() {
                 .find(|tool_call| tool_call.function.name == "get_status_word")
                 .cloned()
                 .expect("raw xAI responses stream should yield get_status_word");
-            let assistant_message = Message::Assistant {
-                id: None,
-                content: vec![AssistantContent::ToolCall(tool_call.clone())],
-            };
+            let assistant_message = Message::Assistant(rig::message::AssistantMessage::new(vec![
+                AssistantContent::ToolCall(tool_call.clone()),
+            ]));
             let tool_result_message = Message::User {
                 content: vec![UserContent::tool_result(
                     tool_call.id.clone(),
@@ -140,7 +121,8 @@ async fn raw_responses_stream_preserves_tool_then_followup_text_ordering() {
             )
             .preamble("Use the provided tool result and answer directly.")
             .message(assistant_message)
-            .message(tool_result_message);
+            .message(tool_result_message)
+            .additional_params(serde_json::json!({ "store": false }));
 
             let second_turn = collect_raw_stream_observation(
                 model

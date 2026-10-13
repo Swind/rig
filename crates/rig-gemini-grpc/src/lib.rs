@@ -4,7 +4,7 @@
 //! use rig_core::Model;
 //! use rig_gemini_grpc::{GeminiGrpc, completion::{GEMINI_2_0_FLASH, GenerateContent}};
 //!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+//! # async fn example() -> Result<(), rig_gemini_grpc::GeminiGrpcError> {
 //! let transport = GeminiGrpc::new("YOUR_API_KEY").await?;
 //! let model = transport.completion(GEMINI_2_0_FLASH);
 //! # let _ = model;
@@ -12,12 +12,15 @@
 //! # }
 //! ```
 
+mod auth;
 pub mod client;
 pub mod completion;
 pub mod embedding;
+pub mod extension;
+pub mod rest;
 pub mod streaming;
 
-pub use client::GeminiGrpc;
+pub use client::{GeminiGrpc, GeminiGrpcError};
 
 /// Generated Gemini protobuf messages and service client.
 ///
@@ -37,9 +40,3 @@ pub use proto::{
     Content, EmbedContentRequest, EmbedContentResponse, GenerateContentRequest,
     GenerateContentResponse, Part, generative_service_client::GenerativeServiceClient,
 };
-
-impl From<&proto::GenerateContentResponse> for rig_core::completion::Usage {
-    fn from(response: &proto::GenerateContentResponse) -> Self {
-        completion::map_usage(response.usage_metadata.as_ref())
-    }
-}

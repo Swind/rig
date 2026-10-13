@@ -11,7 +11,7 @@ readme = "README.md"
 workspace = true
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-rig-core = { path = "../rig-core", version = "0.43.0", default-features = false }
+rig-core = { path = "../rig-core", version = "0.44.0", default-features = false }
 qdrant-client.workspace = true
 rusqlite = { workspace = true, features = ["bundled"] }
 tokio-rusqlite = { workspace = true, features = ["bundled"] }
@@ -22,11 +22,11 @@ thiserror.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
-rig-core = { path = "../rig-core", version = "0.43.0", features = ["reqwest"] }
+rig-core = { path = "../rig-core", version = "0.44.0", features = ["reqwest"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 bytes.workspace = true
-rig-reqwest = { path = "../rig-reqwest", version = "0.43.0" }
-rig-agent = { path = "../rig-agent", version = "0.43.0" }
+rig-reqwest = { path = "../rig-reqwest", version = "0.44.0" }
+rig-agent = { path = "../rig-agent", version = "0.44.0" }
 anyhow.workspace = true
 testcontainers.workspace = true
 httpmock.workspace = true

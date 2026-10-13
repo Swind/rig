@@ -3,7 +3,7 @@
 //! ```no_run
 //! # async fn example(agent: rig_agent::Agent) -> Result<(), rig_agent::completion::PromptError> {
 //! let response = agent.prompt("Explain ownership.").await?;
-//! println!("{}", response.output);
+//! println!("{}", response.output());
 //! # Ok(())
 //! # }
 //! ```
@@ -28,15 +28,13 @@ use rig_core::id::ConversationId;
 
 use super::drive::AgentBus;
 use rig_core::{message::ToolChoice, wasm_compat::WasmCompatSend};
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 use super::UNKNOWN_AGENT_NAME;
 
-/// A prepared completion request plus the executable Rig tool names advertised
-/// to the provider for this turn.
+/// What a completion request was prepared with, including the executable Rig
+/// tool names advertised to the provider for this turn.
 pub(crate) struct PreparedCompletionRequest {
-    /// Request prepared against the selected model's capabilities.
-    pub(crate) request: CompletionRequest,
     /// The messages telemetry records for this attempt.
     pub(crate) telemetry_messages: Vec<Message>,
     /// The typed view the request is dispatched to.
@@ -46,11 +44,8 @@ pub(crate) struct PreparedCompletionRequest {
     /// The definitions the request carries (executable tools plus, in Tool
     /// output mode, the synthetic output tool), for the run's `TurnTools`.
     pub(crate) advertised_tools: Vec<ToolDefinition>,
-    pub(crate) executable_tool_names: BTreeSet<String>,
-    pub(crate) allowed_tool_names: BTreeSet<String>,
-    /// When Tool output mode is active, the name of the synthetic output tool
-    /// advertised to the model, allowed but not executable.
-    pub(crate) output_tool_name: Option<String>,
+    /// The turn's tool policy, fed back to the run with the response.
+    pub(crate) policy: crate::run::TurnPolicy,
     /// Effective structured output-token cap after runner overrides and request
     /// patches. Does not interpret caps passed through additional parameters.
     pub(crate) max_tokens: Option<u64>,
@@ -67,7 +62,7 @@ pub(crate) async fn build_prepared_completion_request(
     chat_history: &[Message],
     committed_output_tool: Option<&str>,
     request_patch: Option<&RequestPatch>,
-) -> Result<PreparedCompletionRequest, ProviderError> {
+) -> Result<(CompletionRequest, PreparedCompletionRequest), ProviderError> {
     let record_telemetry_content = runner.config.record_telemetry_content;
     let tool_server_handle = &runner.tool_server_handle;
 
@@ -82,23 +77,17 @@ pub(crate) async fn build_prepared_completion_request(
     // for hooks unless one opts in), recorded like every other effect.
     let mut dynamic_tool_ids = Vec::new();
     for (key, kind) in tool_server_handle.retrieval_effects(retrieval_query) {
-        let ids = crate::agent::engine::dispatch_effect(
-            &runner.config.hooks,
-            ctx,
-            runner.config.bus.dispatcher(),
-            &key,
-            kind,
-        )
-        .await
-        .and_then(|outcome| match outcome {
-            rig_core::effect::Outcome::Documents(rig_core::effect::RetrievedDocuments::Ids(
-                ids,
-            )) => Ok(ids.into_iter().map(|(_, id)| id).collect::<Vec<String>>()),
-            other => Err(crate::agent::engine::wrong_outcome("retrieved ids", &other)),
-        })
-        .map_err(|report| {
-            ProviderError::request(format!("Failed to get tool definitions: {report}"))
-        })?;
+        let ids = crate::agent::engine::dispatch_effect(runner, ctx, &key, kind)
+            .await
+            .and_then(|outcome| match outcome {
+                rig_core::effect::Outcome::Documents(
+                    rig_core::effect::RetrievedDocuments::Ids(ids),
+                ) => Ok(ids.into_iter().map(|(_, id)| id).collect::<Vec<String>>()),
+                other => Err(crate::agent::engine::wrong_outcome("retrieved ids", &other)),
+            })
+            .map_err(|report| {
+                ProviderError::request(format!("Failed to get tool definitions: {report}"))
+            })?;
         dynamic_tool_ids.extend(ids);
     }
     let mut tool_snapshot = tool_server_handle.snapshot_with_dynamic(&dynamic_tool_ids);
@@ -126,32 +115,30 @@ pub(crate) async fn build_prepared_completion_request(
     // Narrow dispatch to the tools actually advertised this turn (a per-turn
     // `active_tools` allow-list), so the implementation behind every definition
     // the provider received is the one that runs.
-    tool_snapshot.retain_names(&prepared.executable_tool_names);
+    tool_snapshot.retain_names(prepared.policy.executable());
 
     let advertised_tools = prepared.tools.clone();
-    let executable_tool_names = prepared.executable_tool_names.clone();
-    let allowed_tool_names = prepared.allowed_tool_names.clone();
-    let output_tool_name = prepared.output_tool_name.clone();
+    let policy = prepared.policy.clone();
     let max_tokens = prepared.max_tokens;
     // The agent records the input itself, so the request the provider sees
     // carries the telemetry flag off: one span, no double recording.
-    let request = prepared.apply(CompletionRequest::new(prompt));
+    let request = prepared
+        .apply(CompletionRequest::new(prompt))
+        .accept_unknown_finish_reasons(runner.config.accept_unknown_finish_reasons);
     let telemetry_messages = if record_telemetry_content {
         request.messages_for_telemetry()
     } else {
         Vec::new()
     };
-    Ok(PreparedCompletionRequest {
-        request,
+    let prepared = PreparedCompletionRequest {
         telemetry_messages,
         model: model.clone(),
         tool_snapshot: Arc::new(tool_snapshot),
         advertised_tools,
-        executable_tool_names,
-        allowed_tool_names,
-        output_tool_name,
+        policy,
         max_tokens,
-    })
+    };
+    Ok((request, prepared))
 }
 
 /// Rig's own structured-output flow (the extractor) forces its output tool.
@@ -241,6 +228,10 @@ pub(crate) struct AgentConfig {
     pub(crate) static_context: Vec<Document>,
     /// Additional parameters to be passed to the model
     pub(crate) additional_params: Option<serde_json::Value>,
+    /// Portable generation options every request carries.
+    pub(crate) options: rig_core::completion::GenerationOptions,
+    /// Typed per-provider options every request carries.
+    pub(crate) provider_options: rig_core::completion::ProviderOptions,
     /// Whether to record sensitive request, response, and tool content on GenAI spans.
     ///
     /// Defaults to `false`. Enabling this can expose prompts, retrieved context,
@@ -248,6 +239,9 @@ pub(crate) struct AgentConfig {
     /// through OpenTelemetry span attributes, which can increase observability
     /// backend storage and query costs.
     pub(crate) record_telemetry_content: bool,
+    /// Whether a finish reason outside the normalized vocabulary ends a turn
+    /// as a normal stop.
+    pub(crate) accept_unknown_finish_reasons: bool,
     /// Maximum number of tokens for the completion
     pub(crate) max_tokens: Option<u64>,
     /// Temperature of the model
@@ -293,7 +287,10 @@ impl AgentConfig {
             preamble: None,
             static_context: vec![],
             additional_params: None,
+            options: rig_core::completion::GenerationOptions::default(),
+            provider_options: rig_core::completion::ProviderOptions::default(),
             record_telemetry_content: false,
+            accept_unknown_finish_reasons: false,
             max_tokens: None,
             temperature: None,
             tool_choice: None,
@@ -367,11 +364,14 @@ impl AgentConfig {
             preamble: self.preamble.clone(),
             static_context: self.static_context.clone(),
             additional_params: self.additional_params.clone(),
+            options: self.options.clone(),
+            provider_options: self.provider_options.clone(),
             max_tokens: self.max_tokens,
             temperature: self.temperature,
             tool_choice: self.tool_choice.clone(),
             max_turns: Some(self.max_turns),
             max_invalid_tool_call_retries: 0,
+            max_consecutive_malformed_tool_calls: None,
             output_schema: self
                 .output_schema
                 .as_ref()
@@ -381,6 +381,7 @@ impl AgentConfig {
             output_tool_description: None,
             augment_output_preamble: true,
             unhandled_invalid_tool_call: crate::run::spec::UnhandledInvalidToolCall::Fail,
+            accept_unknown_finish_reasons: self.accept_unknown_finish_reasons,
         }
     }
 }
@@ -619,7 +620,7 @@ impl Agent {
     /// # use futures::StreamExt;
     /// # async fn example(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
     /// let response = agent.prompt("What is 2 + 2?").max_turns(3).await?;
-    /// println!("{}", response.output);
+    /// println!("{}", response.output());
     ///
     /// let mut stream = agent.prompt("And 3 + 3?").stream();
     /// while let Some(item) = stream.next().await {
@@ -639,8 +640,10 @@ impl Agent {
     /// resumed under this agent's hooks, tools, and bus, executing pending tool
     /// calls or requesting the next model turn.
     /// The run is authoritative for what it persisted: its prompt, its
-    /// history, its turn budget and its invalid-tool-call retry budget, so
-    /// [`history`](AgentRunner::history) and [`max_turns`](AgentRunner::max_turns)
+    /// history, its turn budget, its invalid-tool-call retry budget and its
+    /// unhandled-invalid-tool-call policy, so
+    /// [`history`](AgentRunner::history), [`max_turns`](AgentRunner::max_turns)
+    /// and [`unhandled_invalid_tool_call`](AgentRunner::unhandled_invalid_tool_call)
     /// on the returned runner have no effect. Everything else still comes
     /// from the agent and the runner: the request shape (preamble, documents,
     /// sampling parameters, additional params, tool choice, output mode),
@@ -648,19 +651,19 @@ impl Agent {
     /// [`tool_context`](AgentRunner::tool_context),
     /// [`tool_concurrency`](AgentRunner::tool_concurrency), the model
     /// selection and telemetry settings (inbound tool context is driver
-    /// state, never part of the persisted run). Two run-side values still show
-    /// through: the run's persisted tool choice is what invalid-call hooks
-    /// see and what gates a `Skip`, while the request's tool choice is the
-    /// runner's; and the output tool the run committed stays committed even
-    /// though the schema and mode advertising it are the runner's. The
-    /// unhandled-invalid-tool-call policy is the run's on the blocking path
-    /// and the runner's on the streamed path. Conversation memory is neither
+    /// state, never part of the persisted run). Invalid-call hooks see, and a
+    /// `Skip` is gated by, the tool choice each turn was sent with. One
+    /// run-side value still shows through: the output tool the run pinned
+    /// stays pinned even though the schema and mode advertising it are the
+    /// runner's.
+    /// Conversation memory is neither
     /// loaded nor appended: the history is already in the run, and the driver
     /// that persisted it owns memory persistence and appends the finished run's
     /// `messages` itself, since a suspended run never reached the `Done`
-    /// append, so the response's `memory_append` is `None`. Pending tool
-    /// calls re-execute on resume: a tool that ran before the suspension and
-    /// answered nothing runs again. Drive it like any runner: `.await`,
+    /// append, so the response's `memory_append` is `None`. Unanswered tool
+    /// calls re-execute on resume: a tool that ran before the suspension but
+    /// whose result was not fed to the run runs again (at least once), while
+    /// answered calls keep their results. Drive it like any runner: `.await`,
     /// [`stream`](AgentRunner::stream) or
     /// [`run_channel`](AgentRunner::run_channel). The run must have been
     /// suspended by the same rig version.
@@ -696,9 +699,7 @@ impl Agent {
         let response = AgentRunner::from_agent(self, prompt)
             .history(chat_history.clone())
             .await?;
-        if let Some(messages) = &response.messages {
-            chat_history.extend(messages.iter().cloned());
-        }
+        chat_history.extend(response.messages.iter().cloned());
         Ok(response)
     }
 

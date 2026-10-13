@@ -1,18 +1,10 @@
 use super::*;
-use crate::test_utils::RecordingHttpClient;
+use crate::test_utils::{RecordingHttpClient, json_body};
 use crate::wire::Capabilities;
 use crate::wire::secret::tests::a_config_reloads_without_its_credential;
 
 fn voyage() -> VoyageAiConfig {
     VoyageAiConfig::new("voyage-test-key")
-}
-
-fn body_of(encoded: &Encoded) -> serde_json::Value {
-    let request = &encoded.request;
-    match request.body() {
-        Body::Bytes(bytes) => serde_json::from_slice(bytes).expect("the body is JSON"),
-        Body::Multipart(_) => panic!("neither Voyage wire sends a multipart body"),
-    }
 }
 
 /// `POST /embeddings`' reply shape, with two-element vectors in place of the
@@ -57,7 +49,7 @@ fn an_unset_option_is_absent_from_the_request() {
         .expect("the request encodes");
 
     assert_eq!(
-        body_of(&encoded),
+        json_body(&encoded.request),
         serde_json::json!({ "model": "voyage-3.5", "input": ["first"] })
     );
 
@@ -70,7 +62,7 @@ fn an_unset_option_is_absent_from_the_request() {
         .expect("the request encodes");
 
     assert_eq!(
-        body_of(&encoded),
+        json_body(&encoded.request),
         serde_json::json!({
             "model": "voyage-3.5",
             "input": ["first"],
@@ -148,7 +140,7 @@ fn a_rerank_request_carries_the_query_the_documents_and_the_options() {
         .expect("the request encodes");
 
     assert_eq!(
-        body_of(&encoded),
+        json_body(&encoded.request),
         serde_json::json!({
             "query": "which is best?",
             "documents": ["worse", "better"],
@@ -157,25 +149,6 @@ fn a_rerank_request_carries_the_query_the_documents_and_the_options() {
             "return_documents": true,
         })
     );
-}
-
-/// The batch limit is the wire's capability, and it is what
-/// `RerankModel::max_documents` reports.
-#[test]
-fn a_rerank_wire_declares_the_batch_limit() {
-    let bound = crate::driver::Model::new(
-        voyage().rerank("rerank-2.5"),
-        RecordingHttpClient::new(RERANK_BODY),
-    );
-    assert_eq!(
-        voyage()
-            .rerank("rerank-2.5")
-            .describe()
-            .capabilities
-            .max_documents,
-        1000
-    );
-    assert_eq!(bound.capabilities().max_documents, 1000);
 }
 
 #[test]
@@ -196,24 +169,4 @@ fn a_serialized_config_carries_no_key_material() {
             "a wire a host may persist must not carry the credential: {serialized}"
         );
     }
-}
-
-/// `raw` is the whole reply body, so a field the reply type does not model
-/// survives in it.
-#[tokio::test]
-async fn an_embedding_reply_keeps_its_whole_body_as_raw() {
-    let body = r#"{"object":"list","data":[{"object":"embedding","embedding":[0.5,-0.25],"index":0},{"object":"embedding","embedding":[0.125,0.0],"index":1}],"model":"voyage-3.5","usage":{"total_tokens":9},"unmodeled":"kept"}"#;
-    let response = crate::driver::Model::new(
-        voyage().embedding("voyage-3.5", None),
-        RecordingHttpClient::new(body),
-    )
-    .call(vec!["first".to_owned(), "second".to_owned()])
-    .await
-    .expect("the reply decodes");
-
-    assert_eq!(
-        response.raw,
-        serde_json::from_str::<serde_json::Value>(body).expect("the body is JSON")
-    );
-    assert_eq!(response.raw["unmodeled"], "kept");
 }

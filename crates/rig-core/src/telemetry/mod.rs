@@ -7,8 +7,8 @@
 //! ```
 use crate::completion::{AssistantContent, Message, Usage};
 use crate::message::{
-    DocumentSourceKind, Image, MimeType, Reasoning, ReasoningContent, ToolResult,
-    ToolResultContent, UserContent,
+    DocumentData, DocumentSourceKind, Image, MimeType, Opaque, ToolResult, ToolResultContent,
+    UserContent,
 };
 use base64::Engine;
 use serde::Serialize;
@@ -45,6 +45,7 @@ macro_rules! __rig_canonical_completion_span {
             $(parent: $parent,)?
             $name,
             $($header)*
+            gen_ai.request.stream = $crate::telemetry::__tracing::field::Empty,
             gen_ai.response.id = $crate::telemetry::__tracing::field::Empty,
             gen_ai.response.model = $crate::telemetry::__tracing::field::Empty,
             rig.provider_request_id = $crate::telemetry::__tracing::field::Empty,
@@ -80,17 +81,25 @@ macro_rules! new_completion_span {
 /// A GenAI operation and its canonical span name. Completion operations carry
 /// message content and may adopt a completion-parent span; the others record
 /// only usage and identity on a fresh span.
+///
+/// Completion operations report the well-known `gen_ai.operation.name` values
+/// of the OpenTelemetry GenAI semantic conventions. Streaming is a delivery
+/// mode, not an operation: it is recorded as `gen_ai.request.stream` (see
+/// [`SpanBuilder::streaming`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenAiOperation {
-    /// A chat completion.
+    /// A chat completion (`chat`), unary or streamed.
     Chat,
     /// A streaming chat completion.
+    #[deprecated(note = "use `Chat`; streaming is recorded by `SpanBuilder::streaming`")]
     ChatStreaming,
-    /// A Gemini generate-content request.
+    /// A Gemini generate-content request (`generate_content`), unary or streamed.
     GenerateContent,
     /// A Gemini Interactions API request.
+    #[deprecated(note = "use `Chat`; streaming is recorded by `SpanBuilder::streaming`")]
     Interactions,
     /// A streaming Gemini Interactions API request.
+    #[deprecated(note = "use `Chat`; streaming is recorded by `SpanBuilder::streaming`")]
     InteractionsStreaming,
     /// A text (or image) embedding request.
     Embeddings,
@@ -104,20 +113,25 @@ pub enum GenAiOperation {
     AudioGeneration,
 }
 
+#[allow(deprecated)]
 impl GenAiOperation {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Chat => "chat",
-            Self::ChatStreaming => "chat_streaming",
+            Self::Chat | Self::ChatStreaming | Self::Interactions | Self::InteractionsStreaming => {
+                "chat"
+            }
             Self::GenerateContent => "generate_content",
-            Self::Interactions => "interactions",
-            Self::InteractionsStreaming => "interactions_streaming",
             Self::Embeddings => "embeddings",
             Self::Rerank => "rerank",
             Self::Transcription => "transcription",
             Self::ImageGeneration => "image_generation",
             Self::AudioGeneration => "audio_generation",
         }
+    }
+
+    /// The delivery mode a deprecated streaming variant implies.
+    fn implied_streaming(self) -> Option<bool> {
+        matches!(self, Self::ChatStreaming | Self::InteractionsStreaming).then_some(true)
     }
 
     pub(crate) fn is_completion(self) -> bool {
@@ -365,6 +379,7 @@ pub struct SpanBuilder<'a> {
     request_model: &'a str,
     operation: GenAiOperation,
     system_instructions: Option<String>,
+    streaming: Option<bool>,
 }
 
 impl<'a> SpanBuilder<'a> {
@@ -375,7 +390,15 @@ impl<'a> SpanBuilder<'a> {
             request_model,
             operation,
             system_instructions: None,
+            streaming: operation.implied_streaming(),
         }
+    }
+
+    /// Record whether the request streams its response, as
+    /// `gen_ai.request.stream`. Only completion spans record it.
+    pub fn streaming(mut self, streaming: bool) -> Self {
+        self.streaming = Some(streaming);
+        self
     }
 
     /// Set the system instructions sent with the request when sensitive content
@@ -401,19 +424,16 @@ impl<'a> SpanBuilder<'a> {
         let (provider, model) = (self.provider, self.request_model);
         let op = self.operation.as_str();
         let sys = self.system_instructions.as_deref();
-        match self.operation {
-            GenAiOperation::Chat => new_completion_span!("chat", provider, model, op, sys),
-            GenAiOperation::ChatStreaming => {
-                new_completion_span!("chat_streaming", provider, model, op, sys)
+        #[allow(deprecated)]
+        let span = match self.operation {
+            GenAiOperation::Chat
+            | GenAiOperation::ChatStreaming
+            | GenAiOperation::Interactions
+            | GenAiOperation::InteractionsStreaming => {
+                new_completion_span!("chat", provider, model, op, sys)
             }
             GenAiOperation::GenerateContent => {
                 new_completion_span!("generate_content", provider, model, op, sys)
-            }
-            GenAiOperation::Interactions => {
-                new_completion_span!("interactions", provider, model, op, sys)
-            }
-            GenAiOperation::InteractionsStreaming => {
-                new_completion_span!("interactions_streaming", provider, model, op, sys)
             }
             GenAiOperation::Embeddings => new_modality_span!("embeddings", provider, model, op),
             GenAiOperation::Rerank => new_modality_span!("rerank", provider, model, op),
@@ -426,6 +446,16 @@ impl<'a> SpanBuilder<'a> {
             GenAiOperation::AudioGeneration => {
                 new_modality_span!("audio_generation", provider, model, op)
             }
+        };
+        if self.operation.is_completion() {
+            self.record_streaming(&span);
+        }
+        span
+    }
+
+    fn record_streaming(&self, span: &tracing::Span) {
+        if let Some(streaming) = self.streaming {
+            span.record("gen_ai.request.stream", streaming);
         }
     }
 
@@ -442,6 +472,7 @@ impl<'a> SpanBuilder<'a> {
         current.record("gen_ai.operation.name", self.operation.as_str());
         current.record("gen_ai.provider.name", self.provider);
         current.record("gen_ai.request.model", self.request_model);
+        self.record_streaming(&current);
         if let Some(system_instructions) = self.system_instructions.as_deref() {
             current.record("gen_ai.system_instructions", system_instructions);
         }
@@ -481,6 +512,9 @@ enum TelemetryPart {
     },
     Reasoning {
         content: String,
+    },
+    Opaque {
+        kind: String,
     },
     Uri {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -532,9 +566,6 @@ where
             modality,
             content: base64::engine::general_purpose::STANDARD.encode(content),
         }),
-        DocumentSourceKind::String(content) => Some(TelemetryPart::Text {
-            content: content.clone(),
-        }),
         DocumentSourceKind::Unknown => None,
     }
 }
@@ -543,21 +574,12 @@ fn image_part(image: &Image) -> Option<TelemetryPart> {
     media_part(&image.data, image.media_type.as_ref(), "image")
 }
 
-fn reasoning_parts(reasoning: &Reasoning) -> Vec<TelemetryPart> {
-    reasoning
-        .content
-        .iter()
-        .map(|content| {
-            let content = match content {
-                ReasoningContent::Text { text, .. } | ReasoningContent::Summary(text) => text,
-                ReasoningContent::Encrypted(content) => content,
-                ReasoningContent::Redacted { data } => data,
-            };
-            TelemetryPart::Reasoning {
-                content: content.clone(),
-            }
-        })
-        .collect()
+/// A provider-only item, named by its `type` and nothing else: its payload
+/// is the provider's, not content.
+fn opaque_part(opaque: &Opaque) -> TelemetryPart {
+    TelemetryPart::Opaque {
+        kind: opaque.kind().unwrap_or("unknown").to_owned(),
+    }
 }
 
 fn tool_result_response(result: &ToolResult) -> serde_json::Value {
@@ -598,9 +620,14 @@ fn user_parts(content: &[UserContent]) -> Vec<TelemetryPart> {
             UserContent::Video(video) => {
                 media_part(&video.data, video.media_type.as_ref(), "video")
             }
-            UserContent::Document(document) => {
-                media_part(&document.data, document.media_type.as_ref(), "document")
-            }
+            UserContent::Document(document) => match &document.data {
+                DocumentData::Text(content) => Some(TelemetryPart::Text {
+                    content: content.clone(),
+                }),
+                DocumentData::File(data) => {
+                    media_part(data, document.media_type.as_ref(), "document")
+                }
+            },
         })
         .collect()
 }
@@ -615,10 +642,13 @@ fn assistant_parts(content: &[AssistantContent]) -> Vec<TelemetryPart> {
             AssistantContent::ToolCall(tool_call) => vec![TelemetryPart::ToolCall {
                 id: Some(tool_call.id.to_string()),
                 name: tool_call.function.name.clone().into(),
-                arguments: tool_call.function.arguments.clone(),
+                arguments: tool_call.function.arguments_value(),
             }],
-            AssistantContent::Reasoning(reasoning) => reasoning_parts(reasoning.value()),
+            AssistantContent::Reasoning(reasoning) => vec![TelemetryPart::Reasoning {
+                content: reasoning.text.clone(),
+            }],
             AssistantContent::Image(image) => image_part(image).into_iter().collect(),
+            AssistantContent::Opaque(opaque) => vec![opaque_part(opaque)],
         })
         .collect()
 }
@@ -637,9 +667,9 @@ fn input_messages(messages: &[Message]) -> Vec<TelemetryChatMessage> {
                 role: "user",
                 parts: user_parts(content),
             },
-            Message::Assistant { content, .. } => TelemetryChatMessage {
+            Message::Assistant(turn) => TelemetryChatMessage {
                 role: "assistant",
-                parts: assistant_parts(content),
+                parts: assistant_parts(&turn.content),
             },
         })
         .collect()

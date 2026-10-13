@@ -10,16 +10,14 @@
 use serde_json::Value;
 
 use rig_core::completion::{CompletionRequest, CompletionResponse, ToolDefinition};
-use rig_core::message::{
-    AssistantContent, CallId, Message, ReasoningContent, ToolResultContent, UserContent,
-};
+use rig_core::message::{AssistantContent, CallId, Message, ToolResultContent, UserContent};
 use rig_core::providers::anthropic::wire::AnthropicConfig;
 use rig_core::providers::gemini::GeminiConfig;
 use rig_core::providers::gemini::completion::GenerateContent;
 use rig_core::providers::openai::wire::OpenAIConfig;
 
 use super::portability::{FOLLOW_UP, Source, decode_whole_reply};
-use super::{Dialect, lost_tokens, response_tokens};
+use super::{Dialect, Params, lost_tokens, response_tokens};
 
 /// The code each record resolves to.
 pub const CODES: [(&str, &str); 2] = [("alpha", "amber-5521"), ("beta", "cobalt-7730")];
@@ -33,7 +31,7 @@ fn code(record: &str) -> &'static str {
 
 fn lookup() -> ToolDefinition {
     ToolDefinition {
-        name: "lookup_code".to_owned(),
+        name: rig_core::message::ToolName::new("lookup_code").expect("tool name"),
         description: "Return the code stored for one record.".to_owned(),
         parameters: serde_json::json!({
             "type": "object",
@@ -44,19 +42,16 @@ fn lookup() -> ToolDefinition {
 }
 
 /// A request over `history` with the lookup tool and `params`.
-pub fn request(history: Vec<Message>, params: Option<Value>, max_tokens: u64) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: history,
-        documents: vec![],
-        tools: vec![lookup()],
-        temperature: None,
-        max_tokens: Some(max_tokens),
-        tool_choice: None,
-        additional_params: params,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+pub fn request(
+    history: Vec<Message>,
+    params: impl Into<Params>,
+    max_tokens: u64,
+) -> CompletionRequest {
+    let mut request = CompletionRequest::from(history);
+    request.tools = vec![lookup()];
+    request.max_tokens = Some(max_tokens);
+    params.into().apply(&mut request);
+    request
 }
 
 fn text(choice: &[AssistantContent]) -> String {
@@ -81,10 +76,7 @@ fn result(call: CallId, record: &str) -> UserContent {
 }
 
 fn assistant(reply: &CompletionResponse) -> Message {
-    Message::Assistant {
-        id: reply.message_id.clone(),
-        content: reply.choice.clone(),
-    }
+    Message::Assistant(reply.head().with_content(reply.choice.clone()))
 }
 
 /// Two completed lookups that both used the call id `id`, then a question
@@ -92,22 +84,22 @@ fn assistant(reply: &CompletionResponse) -> Message {
 pub async fn colliding_ids(
     model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
     id: &str,
-    params: Option<Value>,
+    params: impl Into<Params>,
 ) {
+    let params = params.into();
     let model: rig_core::DynModel<rig_core::operation::Completion> = model.into();
     let mut history = vec![Message::user("Look up record alpha.")];
     for (index, (record, _)) in CODES.iter().enumerate() {
         if index > 0 {
             history.push(Message::user(format!("Now look up record {record}.")));
         }
-        history.push(Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::tool_call(
+        history.push(Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(
                 id,
                 rig_core::message::ToolName::new("lookup_code").expect("tool name"),
                 serde_json::json!({ "record": record }),
-            )],
-        });
+            )]),
+        ));
         let call = CallId::from_wire(id);
         history.push(Message::User {
             content: vec![result(call, record)],
@@ -160,8 +152,9 @@ pub fn assert_colliding_recorded(provider: &str, scenario: &str) {
 /// check the model attributes each code to its record.
 pub async fn out_of_order_results(
     model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
-    params: Option<Value>,
+    params: impl Into<Params>,
 ) {
+    let params = params.into();
     let model: rig_core::DynModel<rig_core::operation::Completion> = model.into();
     let prompt = Message::user(
         "Call lookup_code for record alpha and for record beta, both in this one turn, in parallel.",
@@ -254,10 +247,11 @@ async fn complete(
 pub async fn reasoning_round_trip(
     model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
     prompt: &str,
-    params: Option<Value>,
+    params: impl Into<Params>,
     max_tokens: u64,
     streamed: bool,
 ) -> CompletionResponse {
+    let params = params.into();
     let model: rig_core::DynModel<rig_core::operation::Completion> = model.into();
     let prompt = Message::user(prompt);
     let first = complete(
@@ -298,13 +292,11 @@ pub async fn reasoning_round_trip(
 
 /// Whether a reply holds a signed reasoning block with no text.
 pub fn has_empty_signed_reasoning(reply: &CompletionResponse) -> bool {
-    reply.choice.iter().any(|content| {
-        match content {
-        AssistantContent::Reasoning(reasoning) => reasoning.open(reasoning.issuer()).expect("sealed reasoning").content.iter().any(|block| {
-            matches!(block, ReasoningContent::Text { text, signature: Some(_) } if text.is_empty())
-        }),
+    reply.choice.iter().any(|content| match content {
+        AssistantContent::Reasoning(reasoning) => {
+            reasoning.text.is_empty() && reasoning.native.is_some()
+        }
         _ => false,
-    }
     })
 }
 
@@ -351,7 +343,7 @@ impl Hop {
         let decoded = match self {
             Self::OpenAiResponses => decode_whole_reply(
                 &OpenAIConfig::new("decode-only")
-                    .connect(rig_reqwest::shared())
+                    .connect(crate::cassettes::local_http())
                     .responses("gpt-5-mini")
                     .wire,
                 &body,
@@ -362,7 +354,7 @@ impl Hop {
             ),
             Self::Anthropic => decode_whole_reply(
                 &AnthropicConfig::new("decode-only")
-                    .connect(rig_reqwest::shared())
+                    .connect(crate::cassettes::local_http())
                     .completion("claude-sonnet-4-6")
                     .wire,
                 &body,
@@ -389,7 +381,7 @@ impl Hop {
 pub async fn round_trip_hop(
     model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
     hop: Hop,
-    params: Option<Value>,
+    params: impl Into<Params>,
 ) {
     let model: rig_core::DynModel<rig_core::operation::Completion> = model.into();
     let reply = model

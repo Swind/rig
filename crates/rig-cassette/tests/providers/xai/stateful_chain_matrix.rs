@@ -17,18 +17,10 @@ use serde_json::{Value, json};
 use super::support::with_xai_cassette;
 
 fn request(history: Vec<Message>) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: history,
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: Some(256),
-        tool_choice: None,
-        additional_params: Some(json!({ "store": false })),
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    let mut request = CompletionRequest::from(history);
+    request.max_tokens = Some(256);
+    request.additional_params = Some(json!({ "store": false }));
+    request
 }
 
 fn text(choice: &[AssistantContent]) -> String {
@@ -77,7 +69,7 @@ async fn file_id_chain() {
             let document = Message::User {
                 content: vec![
                     UserContent::Document(Document {
-                        data: DocumentSourceKind::file_id(&file_id),
+                        data: DocumentSourceKind::file_id(&file_id).into(),
                         media_type: Some(DocumentMediaType::PDF),
                         additional_params: None,
                     }),
@@ -92,10 +84,7 @@ async fn file_id_chain() {
             assert!(text(&first.choice).contains('3'), "{:?}", first.choice);
             let history = vec![
                 document,
-                Message::Assistant {
-                    id: first.message_id.clone(),
-                    content: first.choice.clone(),
-                },
+                Message::Assistant(first.head().with_content(first.choice.clone())),
                 Message::user("Is the attached PDF longer than two pages? Answer yes or no."),
             ];
             let second = model

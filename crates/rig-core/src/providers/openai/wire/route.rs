@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::ModelFacts;
 use crate::completion::CompletionRequest;
 use crate::error::{EncodeError, ProviderError};
 use crate::operation::Completion;
@@ -17,6 +18,7 @@ use crate::providers::openai::responses_api::wire::Responses;
 use crate::providers::openai::responses_api::{
     ResponsesToolDefinition, SystemInstructionsPlacement,
 };
+use crate::wire::document::Reassemble;
 use crate::wire::{Decoder, Descriptor, Encoded, Flow, Mode, Out, Wire, WireEvent, WireFrame};
 
 use super::OpenAIConfig;
@@ -104,12 +106,6 @@ impl OpenAiWire {
         self.on_chat(Chat::with_tool_result_array_content)
     }
 
-    /// Ask the provider to cache the prompt: an OpenRouter `cache_control`
-    /// on the chat body, so a no-op on the Responses route.
-    pub fn with_prompt_caching(self) -> Self {
-        self.on_chat(Chat::with_prompt_caching)
-    }
-
     /// Add a provider-side tool to every request: a Responses shape, so a
     /// no-op on the chat route, which carries no wire-level tools.
     pub fn with_tool(self, tool: impl Into<ResponsesToolDefinition>) -> Self {
@@ -140,6 +136,15 @@ impl OpenAiWire {
     /// no-op on the chat route, which sends them that way already.
     pub fn with_system_instructions_as_messages(self) -> Self {
         self.on_responses(Responses::with_system_instructions_as_messages)
+    }
+
+    /// The same wire, encoding with `facts` and pricing its replies by
+    /// them, on whichever route this is.
+    pub fn with_facts(self, facts: ModelFacts) -> Self {
+        match self {
+            Self::Chat(wire) => Self::Chat(wire.with_facts(facts)),
+            Self::Responses(wire) => Self::Responses(wire.with_facts(facts)),
+        }
     }
 
     /// Apply a chat-route option; the Responses route is left as it is.
@@ -175,7 +180,8 @@ impl Wire for OpenAiWire {
     type Op = Completion;
     type Payload = crate::wire::Encoded;
     type Frame = crate::wire::WireFrame;
-    type Decoder<'id> = OpenAiDecoder<'id>;
+    type Decoder<'id> = OpenAiDecoder;
+    type Reassembler = OpenAiReassembler;
 
     fn describe(&self) -> Descriptor<'_> {
         on_route!(self, wire => wire.describe())
@@ -185,11 +191,45 @@ impl Wire for OpenAiWire {
         on_route!(self, wire => wire.encode(request, mode))
     }
 
-    fn decoder<'id>(&self) -> OpenAiDecoder<'id> {
+    fn decoder<'id>(&self) -> Self::Decoder<'id> {
         match self {
             Self::Chat(wire) => OpenAiDecoder::Chat(wire.decoder()),
             Self::Responses(wire) => OpenAiDecoder::Responses(wire.decoder()),
         }
+    }
+
+    fn reassembler(&self) -> Self::Reassembler {
+        match self {
+            Self::Chat(wire) => OpenAiReassembler::Chat(wire.reassembler()),
+            Self::Responses(wire) => OpenAiReassembler::Responses(wire.reassembler()),
+        }
+    }
+}
+
+/// The chosen route's reassembler.
+pub enum OpenAiReassembler {
+    /// The chat-completions reply document.
+    Chat(<Chat as Wire>::Reassembler),
+    /// The Responses reply document.
+    Responses(<Responses as Wire>::Reassembler),
+}
+
+/// The chat route's, as [`OpenAiWire`]'s default route is.
+impl Default for OpenAiReassembler {
+    fn default() -> Self {
+        Self::Chat(Default::default())
+    }
+}
+
+impl crate::wire::document::Serves<crate::operation::Completion> for OpenAiReassembler {}
+
+impl Reassemble<WireFrame> for OpenAiReassembler {
+    fn absorb(&mut self, frame: &WireFrame) {
+        on_route!(self, document => document.absorb(frame));
+    }
+
+    fn finish(self) -> serde_json::Value {
+        on_route!(self, document => document.finish())
     }
 }
 
@@ -202,14 +242,14 @@ pub enum OpenAiEvent {
 }
 
 /// The chosen route's decoder.
-pub enum OpenAiDecoder<'id> {
+pub enum OpenAiDecoder {
     /// The chat-completions state machine.
-    Chat(ChatDecoder<'id>),
+    Chat(ChatDecoder),
     /// The Responses state machine.
-    Responses(ResponsesDecoder<'id>),
+    Responses(ResponsesDecoder),
 }
 
-impl<'id> Decoder<'id, Completion> for OpenAiDecoder<'id> {
+impl<'id> Decoder<'id, Completion> for OpenAiDecoder {
     type Event = OpenAiEvent;
 
     fn classify(&self, frame: WireFrame) -> WireEvent<OpenAiEvent> {

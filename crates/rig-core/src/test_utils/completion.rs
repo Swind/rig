@@ -14,7 +14,7 @@ use crate::{
     message::{ToolCall, ToolFunction},
 };
 
-use super::streaming::{MOCK_PROVIDER, MockDecoder, MockFrame, MockStreamEvent};
+use super::streaming::{MOCK_PROVIDER, MockDecoder, MockDocument, MockFrame, MockStreamEvent};
 
 /// Scripted error returned by [`MockCompletionModel`].
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -60,7 +60,6 @@ pub struct MockTurn {
 struct MockTurnResponse {
     choice: Vec<AssistantContent>,
     usage: Usage,
-    message_id: Option<String>,
     response_id: Option<String>,
     provider_request_id: Option<String>,
     finish_reason: Option<crate::completion::FinishReason>,
@@ -141,7 +140,6 @@ impl MockTurn {
             response: Ok(MockTurnResponse {
                 choice: vec![content],
                 usage: Usage::default(),
-                message_id: None,
                 response_id: None,
                 provider_request_id: None,
                 finish_reason: None,
@@ -159,7 +157,6 @@ impl MockTurn {
             response: Ok(MockTurnResponse {
                 choice: content.into_iter().collect(),
                 usage: Usage::default(),
-                message_id: None,
                 response_id: None,
                 provider_request_id: None,
                 finish_reason: None,
@@ -186,14 +183,6 @@ impl MockTurn {
     pub fn with_usage(mut self, usage: Usage) -> Self {
         if let Ok(response) = &mut self.response {
             response.usage = usage;
-        }
-        self
-    }
-
-    /// Set a provider-assigned assistant message ID for this turn.
-    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
-        if let Ok(response) = &mut self.response {
-            response.message_id = Some(message_id.into());
         }
         self
     }
@@ -260,11 +249,10 @@ impl MockTurn {
     fn into_completion_response(self) -> Result<CompletionResponse, ProviderError> {
         let raw = self.raw()?;
         let response = self.response.map_err(MockError::into_completion_error)?;
-        let mut completion =
-            CompletionResponse::new(response.choice, response.usage, MOCK_PROVIDER, raw)
-                .with_optional_finish_reason(response.finish_reason);
-        completion.message_id = response.message_id;
-        completion.response_id = response.response_id;
+        let mut origin = crate::message::Origin::new(MOCK_API, MOCK_PROVIDER, "");
+        origin.response_id = response.response_id;
+        let mut completion = CompletionResponse::new(response.choice, response.usage, origin, raw)
+            .with_optional_finish_reason(response.finish_reason);
         completion.provider_request_id = response.provider_request_id;
         Ok(completion)
     }
@@ -314,6 +302,70 @@ impl MockScript {
     }
 }
 
+/// The wire format the scripted wire names.
+pub const MOCK_API: crate::message::Api = crate::message::Api::from_static("mock.script");
+
+/// The model a scripted wire addresses when it names none.
+pub const MOCK_MODEL: &str = "mock-model";
+
+impl crate::completion::ReplayTarget for MockScript {
+    fn api(&self) -> crate::message::Api {
+        MOCK_API
+    }
+
+    /// A script takes every option and sends nothing for it, so a test
+    /// reads the options it set on the request the script records.
+    fn map_options(
+        &self,
+        _request: &crate::completion::CompletionRequest,
+        fields: crate::completion::options::OptionFields<'_>,
+    ) -> crate::completion::options::OptionMap {
+        use crate::completion::options::{Mapping, OptionFields, OptionMap};
+        let OptionFields {
+            reasoning,
+            cache,
+            service_tier,
+            verbosity,
+            parallel_tool_calls,
+            top_p,
+            seed,
+            stop,
+        } = fields;
+        let taken = |set: bool| match set {
+            true => Mapping::Omit("a scripted reply ignores options"),
+            false => Mapping::Nothing,
+        };
+        OptionMap {
+            reasoning: taken(reasoning.is_some()),
+            cache: taken(cache.is_some()),
+            service_tier: taken(service_tier.is_some()),
+            verbosity: taken(verbosity.is_some()),
+            parallel_tool_calls: taken(parallel_tool_calls.is_some()),
+            top_p: taken(top_p.is_some()),
+            seed: taken(seed.is_some()),
+            stop: taken(!stop.is_empty()),
+        }
+    }
+
+    // Scripts state a finish reason only when a test is about one.
+    fn states_finish_reason(&self) -> bool {
+        false
+    }
+
+    fn provider(&self) -> &str {
+        &self.name
+    }
+
+    /// The model the script addresses: its id, or [`MOCK_MODEL`].
+    fn model(&self) -> &str {
+        self.id.as_deref().unwrap_or(MOCK_MODEL)
+    }
+
+    fn accepts(&self, _model: &str) -> crate::completion::Accepts {
+        crate::completion::Accepts::ALL
+    }
+}
+
 impl Default for MockScript {
     fn default() -> Self {
         Self::new(MOCK_PROVIDER)
@@ -325,33 +377,22 @@ impl Wire for MockScript {
     type Payload = CompletionRequest;
     type Frame = MockFrame;
     type Decoder<'id> = MockDecoder<'id>;
+    type Reassembler = MockDocument;
 
     fn describe(&self) -> Descriptor<'_> {
         Descriptor::new(&self.name)
             .model(self.id.as_deref())
             .capabilities(self.capabilities)
+            .replay(self)
     }
 
-    /// A completion replays only the reasoning this runtime issued, as every
-    /// completion wire's encode scopes it.
+    /// The request as the runtime received it, its history already shaped
+    /// for this wire.
     fn encode(
         &self,
         request: CompletionRequest,
         _mode: Mode,
     ) -> Result<CompletionRequest, EncodeError> {
-        let issuers = [crate::message::Issuer::from(self.name.clone())];
-        let mut request = request.replayable_to(&issuers)?;
-        for message in request.chat_history.iter_mut() {
-            // `replayable_to` left only messages with a part to keep.
-            if let crate::message::Message::Assistant { content, .. } = message {
-                content.retain(|part| match part {
-                    AssistantContent::Reasoning(reasoning) => {
-                        reasoning.open_for(&issuers).is_some()
-                    }
-                    _ => true,
-                });
-            }
-        }
         Ok(request)
     }
 
@@ -516,3 +557,34 @@ impl Transport<MockScript> for MockRuntime {
 
 #[cfg(test)]
 mod tests;
+
+/// Every set option refused, for a test target that takes none.
+pub fn refuse_options(
+    fields: crate::completion::options::OptionFields<'_>,
+) -> crate::completion::options::OptionMap {
+    use crate::completion::options::{Mapping, OptionFields, OptionMap};
+    let OptionFields {
+        reasoning,
+        cache,
+        service_tier,
+        verbosity,
+        parallel_tool_calls,
+        top_p,
+        seed,
+        stop,
+    } = fields;
+    let refused = |set: bool| match set {
+        true => Mapping::unsupported("the test target takes no options"),
+        false => Mapping::Nothing,
+    };
+    OptionMap {
+        reasoning: refused(reasoning.is_some()),
+        cache: refused(cache.is_some()),
+        service_tier: refused(service_tier.is_some()),
+        verbosity: refused(verbosity.is_some()),
+        parallel_tool_calls: refused(parallel_tool_calls.is_some()),
+        top_p: refused(top_p.is_some()),
+        seed: refused(seed.is_some()),
+        stop: refused(!stop.is_empty()),
+    }
+}

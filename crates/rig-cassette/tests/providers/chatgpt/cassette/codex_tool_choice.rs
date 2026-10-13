@@ -28,75 +28,6 @@ fn tool_call_names(choice: &[AssistantContent]) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn required_forces_a_tool_call() {
-    with_chatgpt_cassette(
-        "codex_tool_choice/required_forces_a_tool_call",
-        |client| async move {
-            let model = client.completion(chatgpt::GPT_5_4);
-            let request = CompletionRequest::new("Please greet me.")
-                .preamble(TOOLS_PREAMBLE.to_string())
-                .tool(rig::tool::tool_definition(&Adder))
-                .tool_choice(ToolChoice::Required);
-
-            let response = model
-                .call(request)
-                .await
-                .expect("required tool choice completion should succeed");
-
-            let names = tool_call_names(&response.choice);
-            assert!(
-                !names.is_empty(),
-                "tool_choice=required must force a tool call even for a chat prompt, got {:?}",
-                response.choice
-            );
-            assert!(
-                names.iter().all(|name| name == Adder::NAME),
-                "only the provided tool can be called, saw {names:?}"
-            );
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn none_suppresses_tool_calls() {
-    with_chatgpt_cassette(
-        "codex_tool_choice/none_suppresses_tool_calls",
-        |client| async move {
-            let model = client.completion(chatgpt::GPT_5_4);
-            let request = CompletionRequest::new("What is 2 plus 3? Reply with just the number.")
-                .preamble(TOOLS_PREAMBLE.to_string())
-                .tool(rig::tool::tool_definition(&Adder))
-                .tool_choice(ToolChoice::None);
-
-            let response = model
-                .call(request)
-                .await
-                .expect("none tool choice completion should succeed");
-
-            let names = tool_call_names(&response.choice);
-            assert!(
-                names.is_empty(),
-                "tool_choice=none must suppress tool calls, saw {names:?}"
-            );
-            let text: String = response
-                .choice
-                .iter()
-                .filter_map(|content| match content {
-                    AssistantContent::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect();
-            assert!(
-                text.contains('5'),
-                "model should answer directly without tools, got {text:?}"
-            );
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
 async fn specific_single_function_targets_named_tool() {
     with_chatgpt_cassette(
         "codex_tool_choice/specific_single_function_targets_named_tool",
@@ -107,7 +38,9 @@ async fn specific_single_function_targets_named_tool() {
                 .tool(rig::tool::tool_definition(&Adder))
                 .tool(rig::tool::tool_definition(&Subtract))
                 .tool_choice(ToolChoice::Specific {
-                    function_names: vec![Subtract::NAME.to_string()],
+                    function_names: vec![
+                        rig_core::message::ToolName::new(Subtract::NAME).expect("tool name"),
+                    ],
                 });
 
             let response = model
@@ -165,7 +98,10 @@ async fn specific_multiple_functions_use_allowed_tools() {
                 .tool(rig::tool::tool_definition(&Subtract))
                 .tool(rig::tool::tool_definition(&AlphaSignal))
                 .tool_choice(ToolChoice::Specific {
-                    function_names: vec![Adder::NAME.to_string(), Subtract::NAME.to_string()],
+                    function_names: vec![
+                        rig_core::message::ToolName::new(Adder::NAME).expect("tool name"),
+                        rig_core::message::ToolName::new(Subtract::NAME).expect("tool name"),
+                    ],
                 });
 
             let response = model

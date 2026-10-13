@@ -7,18 +7,7 @@ use rig_core::{
 use super::*;
 
 fn request() -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: vec![Message::user("hi")],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    CompletionRequest::from(vec![Message::user("hi")])
 }
 
 #[test]
@@ -37,7 +26,7 @@ fn replay_keeps_recorded_model_semantics_even_when_it_has_records() {
         record.outcome = Ok(Outcome::Completion(CompletionResponse::new(
             vec![AssistantContent::text("ok")],
             Usage::default(),
-            "composing-model",
+            rig_core::message::Origin::new("test.api", "composing-model", ""),
             serde_json::json!({}),
         )));
     }
@@ -219,7 +208,7 @@ fn discarded_records_do_not_retain_earlier_or_later_delivery_history() {
         };
         recorder.delivery(delivery.clone());
         recorder.discard(id);
-        // The ECS outcome observer can run after an async layer discarded.
+        // An outcome observer can run after an async layer discarded.
         recorder.delivery(delivery);
         assert!(recorder.take().records.is_empty());
         assert!(recorder.header().deliveries.unwrap().is_empty());
@@ -278,6 +267,7 @@ fn stream_error_metadata_is_validated_and_released_with_its_records() {
 fn effect_record_and_log_round_trip() {
     let log: EffectLog = EffectLog::from_records(vec![
         EffectRecord {
+            stream_origin: None,
             tool_output: None,
             parent: None,
             scope: None,
@@ -290,12 +280,13 @@ fn effect_record_and_log_round_trip() {
             outcome: Ok(Outcome::Completion(CompletionResponse::new(
                 vec![AssistantContent::text("hi")],
                 Usage::default(),
-                "mock",
+                rig_core::message::Origin::new("test.api", "mock", ""),
                 serde_json::json!({}),
             ))),
             events: None,
         },
         EffectRecord {
+            stream_origin: None,
             tool_output: None,
             parent: None,
             scope: None,
@@ -344,7 +335,7 @@ fn missing_published_output_is_unknown_not_explicitly_absent() {
     json["records"][0]
         .as_object_mut()
         .unwrap()
-        .remove("tool_output");
+        .shift_remove("tool_output");
     let error = serde_json::from_value::<EffectLog>(json).expect_err("old recorder omitted output");
     assert!(error.to_string().contains("tool_output"));
 }
@@ -439,6 +430,7 @@ fn custom_kind() -> EffectKind {
 fn two_records() -> EffectLog {
     EffectLog::from_records(vec![
         EffectRecord {
+            stream_origin: None,
             tool_output: None,
             parent: None,
             scope: None,
@@ -451,6 +443,7 @@ fn two_records() -> EffectLog {
             events: None,
         },
         EffectRecord {
+            stream_origin: None,
             tool_output: None,
             parent: None,
             scope: None,
@@ -701,11 +694,16 @@ async fn typed_tool_namespaces_survive_log_roundtrip_and_replay() {
             .enumerate()
             .flat_map(|(part, call)| {
                 [
-                    serde_json::json!({"event": "start", "part": part, "kind": "tool_call"}),
+                    serde_json::json!({
+                        "event": "start",
+                        "part": part,
+                        "kind": "tool_call",
+                        "name": call.function.name,
+                    }),
                     serde_json::json!({
                         "event": "arguments",
                         "part": part,
-                        "json": call.function.arguments.to_string(),
+                        "json": call.function.arguments_value().to_string(),
                     }),
                     serde_json::json!({
                         "event": "end",
@@ -719,10 +717,9 @@ async fn typed_tool_namespaces_survive_log_roundtrip_and_replay() {
     ))
     .expect("a transcript");
     let mut next = request();
-    next.chat_history.push(Message::Assistant {
-        id: None,
-        content: choice.clone(),
-    });
+    next.chat_history.push(Message::Assistant(
+        rig_core::message::AssistantMessage::new(choice.clone()),
+    ));
     next.chat_history.push(Message::User {
         content: calls
             .iter()
@@ -744,7 +741,7 @@ async fn typed_tool_namespaces_survive_log_roundtrip_and_replay() {
     records[0].outcome = Ok(Outcome::Completion(CompletionResponse::new(
         choice,
         Usage::default(),
-        "test",
+        rig_core::message::Origin::new("test.api", "test", ""),
         serde_json::json!({}),
     )));
     records[0].events = Some(events);
@@ -755,7 +752,7 @@ async fn typed_tool_namespaces_survive_log_roundtrip_and_replay() {
     records[1].outcome = Ok(Outcome::Completion(CompletionResponse::new(
         vec![AssistantContent::text("done")],
         Usage::default(),
-        "test",
+        rig_core::message::Origin::new("test.api", "test", ""),
         serde_json::json!({}),
     )));
     let log = EffectLog::from_records(records);
@@ -814,7 +811,7 @@ async fn typed_tool_namespaces_survive_log_roundtrip_and_replay() {
                     .is_some_and(serde_json::Value::is_string)
                     || object
                         .get("provider")
-                        .is_some_and(|provider| provider.get("call_id").is_some()))
+                        .is_some_and(serde_json::Value::is_string))
         });
         if is_call_id {
             *value = serde_json::json!("tool-0");

@@ -68,10 +68,10 @@ impl AgentHook for LoggingHook {
         // `on_outcome` fires for every effect family; only report completions.
         if let Some(response) = event.completion() {
             println!(
-                "[run {}] received response (usage: {:?}, message_id: {:?}): {:?}",
+                "[run {}] received response (usage: {:?}, response_id: {:?}): {:?}",
                 ctx.run_id(),
                 response.usage,
-                response.message_id,
+                response.response_id(),
                 response.choice
             );
         }
@@ -165,7 +165,7 @@ async fn main() -> Result<()> {
         .add_hook(SamplingHook)
         .add_hook(TurnCounterHook)
         .await?
-        .output;
+        .output();
 
     println!("\nFinal response:\n{response}");
 

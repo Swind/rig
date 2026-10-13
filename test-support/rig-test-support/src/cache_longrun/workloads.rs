@@ -17,10 +17,7 @@ use rig_agent::agent::{
 };
 use rig_cassette::http::CassetteClock;
 use rig_core::completion::Message;
-use rig_core::message::{
-    AdditionalParams, AssistantContent, Document, DocumentMediaType, DocumentSourceKind,
-    UserContent,
-};
+use rig_core::message::{AssistantContent, Document, DocumentData, DocumentMediaType, UserContent};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -269,7 +266,8 @@ pub struct TurnTools {
 fn turn_tools(messages: &[Message]) -> TurnTools {
     let mut tools = TurnTools::default();
     for message in messages {
-        let Message::Assistant { content, .. } = message else {
+        let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = message
+        else {
             continue;
         };
         let mut histories = 0;
@@ -387,11 +385,9 @@ pub fn policy_document(citations: bool) -> UserContent {
         })
     });
     UserContent::Document(Document {
-        data: DocumentSourceKind::String(policy_text()),
+        data: DocumentData::Text(policy_text()),
         media_type: Some(DocumentMediaType::TXT),
-        additional_params: params
-            .and_then(|params| AdditionalParams::try_from_value(params).ok())
-            .unwrap_or_default(),
+        additional_params: params,
     })
 }
 

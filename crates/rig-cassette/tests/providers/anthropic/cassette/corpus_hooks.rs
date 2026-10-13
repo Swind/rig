@@ -90,7 +90,7 @@ async fn final_output(stream: &mut rig::agent::StreamingResult) -> String {
     let mut output = None;
     while let Some(item) = stream.next().await {
         if let MultiTurnStreamItem::FinalResponse(response) = item.expect("the stream yields") {
-            output = Some(response.output);
+            output = Some(response.output());
         }
     }
     output.expect("a final response")
@@ -117,7 +117,7 @@ async fn observe_everything_effect_log_is_the_golden_fixture() {
             .max_turns(3)
             .await
             .expect("the agent answers");
-        assert!(response.output.contains("42"), "{}", response.output);
+        assert!(response.output().contains("42"), "{}", response.output());
         let log = agent.stamp(recorder.take());
         assert_eq!(
             families(&log),
@@ -154,7 +154,7 @@ async fn patch_tool_args_effect_log_is_the_golden_fixture() {
             .max_turns(3)
             .await
             .expect("the agent answers");
-        assert!(response.output.contains("42"), "{}", response.output);
+        assert!(response.output().contains("42"), "{}", response.output());
         let log = agent.stamp(recorder.take());
         assert_eq!(
             families(&log),
@@ -170,10 +170,12 @@ async fn patch_tool_args_effect_log_is_the_golden_fixture() {
             .chat_history
             .iter()
             .find_map(|message| match message {
-                Message::Assistant { content, .. } => content.iter().find_map(|c| match c {
-                    AssistantContent::ToolCall(call) => Some(call.function.arguments.clone()),
-                    _ => None,
-                }),
+                Message::Assistant(rig::message::AssistantMessage { content, .. }) => {
+                    content.iter().find_map(|c| match c {
+                        AssistantContent::ToolCall(call) => Some(call.function.arguments_value()),
+                        _ => None,
+                    })
+                }
                 _ => None,
             })
             .expect("the model's call is in history");
@@ -238,7 +240,7 @@ async fn deny_tool_effect_log_is_the_golden_fixture() {
             .max_turns(3)
             .await
             .expect("the agent answers");
-        assert!(!response.output.is_empty());
+        assert!(!response.output().is_empty());
         let log = agent.stamp(recorder.take());
         assert_eq!(
             families(&log),
@@ -299,9 +301,9 @@ async fn replace_tool_result_effect_log_is_the_golden_fixture() {
             .await
             .expect("the agent answers");
         assert!(
-            response.output.contains(REPLACED_RESULT),
+            response.output().contains(REPLACED_RESULT),
             "{}",
-            response.output
+            response.output()
         );
         let log = agent.stamp(recorder.take());
         assert_eq!(
@@ -333,7 +335,7 @@ async fn replace_answer_effect_log_is_the_golden_fixture() {
             .record_to(recorder.clone())
             .build();
         let response = agent.prompt(BASIC_PROMPT).await.expect("the agent answers");
-        assert_eq!(response.output, REPLACED_ANSWER);
+        assert_eq!(response.output(), REPLACED_ANSWER);
         let log = agent.stamp(recorder.take());
         assert_eq!(families(&log), [EffectFamily::Completion]);
         let recorded = match &log.records[0].outcome {
@@ -366,7 +368,7 @@ async fn preamble_override_effect_log_is_the_golden_fixture() {
             .record_to(recorder.clone())
             .build();
         let response = agent.prompt(BASIC_PROMPT).await.expect("the agent answers");
-        assert!(!response.output.is_empty());
+        assert!(!response.output().is_empty());
         let log = agent.stamp(recorder.take());
         assert_eq!(families(&log), [EffectFamily::Completion]);
         assert_eq!(
@@ -397,7 +399,7 @@ async fn demand_done_effect_log_is_the_golden_fixture() {
             .max_turns(3)
             .await
             .expect("the agent answers");
-        assert!(response.output.contains("DONE"), "{}", response.output);
+        assert!(response.output().contains("DONE"), "{}", response.output());
         let log = agent.stamp(recorder.take());
         assert_eq!(
             families(&log),
@@ -427,7 +429,7 @@ async fn lookup_before_run_effect_log_is_the_golden_fixture() {
             .max_turns(3)
             .await
             .expect("the agent answers");
-        assert!(response.output.contains("42"), "{}", response.output);
+        assert!(response.output().contains("42"), "{}", response.output());
         let log = agent.stamp(recorder.take());
         assert_eq!(
             families(&log),
@@ -467,9 +469,9 @@ async fn two_hooks_effect_log_is_the_golden_fixture() {
             .await
             .expect("the agent answers");
         assert!(
-            response.output.contains(REPLACED_RESULT),
+            response.output().contains(REPLACED_RESULT),
             "{}",
-            response.output
+            response.output()
         );
         let log = agent.stamp(recorder.take());
         assert_eq!(log.header.hooks, ["PatchAddArgs", "ReplaceAddResult"]);

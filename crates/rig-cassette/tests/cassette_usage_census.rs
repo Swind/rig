@@ -47,13 +47,12 @@ use rig::completion::{CompletionRequest, Usage};
 use rig::driver::Model;
 use rig::operation::Completion;
 use rig::providers::anthropic::wire::AnthropicConfig;
-use rig::providers::cohere::CohereConfig;
 use rig::providers::copilot::CopilotConfig;
 use rig::providers::gemini::GeminiConfig;
 use rig::providers::ollama::OllamaConfig;
 use rig::providers::openai::wire::{
-    DEEPSEEK, DOUBLEWORD, Dialect, GROQ, LLAMACPP, MISTRAL, OPENAI, OPENROUTER, OpenAIConfig,
-    PERPLEXITY, VENICE,
+    COHERE, DEEPSEEK, DOUBLEWORD, Dialect, GROQ, LLAMACPP, MISTRAL, OLLAMA, OPENAI, OPENROUTER,
+    OpenAIConfig, PERPLEXITY, VENICE,
 };
 use rig::test_utils::{MockHttpResponse, SequencedHttpClient};
 use rig::wire::{Framing, WireFrame};
@@ -125,11 +124,13 @@ enum Route {
     Copilot {
         responses: bool,
     },
-    Cohere,
+    /// Ollama's native `/api/chat`.
     Ollama,
     GenerateContent,
     Interactions,
     Converse,
+    /// Cohere's native `/v2/chat`.
+    CohereChat,
 }
 
 impl Route {
@@ -137,13 +138,12 @@ impl Route {
     fn wire(self) -> &'static str {
         match self {
             Self::Messages => "messages",
-            Self::Chat(_) | Self::Cohere | Self::Ollama | Self::Copilot { responses: false } => {
-                "chat"
-            }
+            Self::Chat(_) | Self::Ollama | Self::Copilot { responses: false } => "chat",
             Self::Responses(_) | Self::Copilot { responses: true } => "responses",
             Self::GenerateContent => "generate_content",
             Self::Interactions => "interactions",
             Self::Converse => "converse",
+            Self::CohereChat => "cohere_chat",
         }
     }
 }
@@ -157,12 +157,14 @@ enum Endpoint {
 
 fn chat_dialect(provider: &str) -> Option<&'static Dialect> {
     Some(match provider {
+        "cohere" => &COHERE,
         "deepseek" => &DEEPSEEK,
         "doubleword" => &DOUBLEWORD,
         "groq" => &GROQ,
         "llamacpp" => &LLAMACPP,
         "mistral" => &MISTRAL,
         "mistralrs" | "openai" => &OPENAI,
+        "ollama" => &OLLAMA,
         "openrouter" => &OPENROUTER,
         "perplexity" => &PERPLEXITY,
         "venice" => &VENICE,
@@ -195,7 +197,6 @@ fn classify(provider: &str, method: &str, path: &str) -> Endpoint {
         "bedrock" if path.ends_with("/converse") || path.ends_with("/converse-stream") => {
             Some(Route::Converse)
         }
-        "cohere" if path == "/v2/chat" => Some(Route::Cohere),
         "copilot" if path.ends_with("/chat/completions") => {
             Some(Route::Copilot { responses: false })
         }
@@ -206,6 +207,7 @@ fn classify(provider: &str, method: &str, path: &str) -> Endpoint {
             Some(Route::GenerateContent)
         }
         "gemini" if path.ends_with("/interactions") => Some(Route::Interactions),
+        "cohere" if path.ends_with("/v2/chat") => Some(Route::CohereChat),
         "ollama" if path == "/api/chat" => Some(Route::Ollama),
         _ if path.ends_with("/chat/completions") => chat_dialect(provider).map(Route::Chat),
         _ if path.ends_with("/responses") => responses_dialect(provider).map(Route::Responses),
@@ -464,13 +466,9 @@ fn replaying_model(
             .connect(recorded_http(headers, body))
             .completion(model)
             .erase(),
-        Route::Cohere => CohereConfig::new("census")
-            .connect(recorded_http(headers, body))
-            .completion(model)
-            .erase(),
         Route::Ollama => OllamaConfig::new()
             .connect(recorded_http(headers, body))
-            .completion(model)
+            .native_completion(model)
             .erase(),
         Route::GenerateContent => GeminiConfig::new("census")
             .connect(recorded_http(headers, body))
@@ -480,6 +478,15 @@ fn replaying_model(
             .connect(recorded_http(headers, body))
             .interactions(model)
             .erase(),
+        Route::CohereChat => {
+            let mut model = rig::providers::cohere::CohereConfig::new("census")
+                .connect(recorded_http(headers, body))
+                .completion(model);
+            model.wire = model
+                .wire
+                .with_route(rig::providers::cohere::ChatRoute::Native);
+            model.erase()
+        }
     }
 }
 

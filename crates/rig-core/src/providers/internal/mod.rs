@@ -11,12 +11,8 @@
 //! ```
 
 pub(crate) mod auth;
-#[cfg(not(target_family = "wasm"))]
-pub(crate) mod device_auth;
-pub(crate) mod media;
 pub(crate) mod openai_chat_completions_compatible;
 pub(crate) mod schema;
-pub mod thoughts;
 /// The debug-mode sequence-law validator the completion fold checks a
 /// decoder's output against; its checks run under `debug_assertions`.
 pub mod wire;
@@ -89,22 +85,6 @@ pub(crate) mod named_dialect {
             serde::de::Error::custom(format!("`{name}` is not a registered {family} dialect"))
         })
     }
-}
-
-/// Reads the provider's transport request id off a response's headers, when
-/// the provider names such a header and the response carries a non-empty
-/// value. `None` is the documented "not reported" outcome.
-pub(crate) fn request_id_from_headers(
-    headers: &http::HeaderMap,
-    request_id_header: Option<&str>,
-) -> Option<String> {
-    request_id_header.and_then(|header| {
-        headers
-            .get(header)
-            .and_then(|value| value.to_str().ok())
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    })
 }
 
 /// Append `pairs` to `path` as a percent-encoded query string.

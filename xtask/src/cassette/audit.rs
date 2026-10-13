@@ -7,8 +7,10 @@
 //! the same content, in the same order, as its typed replacement is a
 //! migrated stream; a count that follows the stream items (a delivery
 //! batch, a stream error's position, a validated offset) moves only in a
-//! migrated golden. A change outside these kinds, or a part that disagrees
-//! with its fragments, fails the audit.
+//! migrated golden. A `cost` added to a usage, or `citations` added to a
+//! text block, is the fold normalizing what the reply already held. A change
+//! outside these kinds, or a part that disagrees with its fragments, fails
+//! the audit.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -16,7 +18,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::goldens::git;
+use crate::support::output;
 
 const EFFECTS: &str = "crates/rig-cassette/fixtures/effects";
 
@@ -45,8 +47,13 @@ pub(crate) enum Change {
     Rebatched,
     /// A count that follows the number of stream items, in a migrated golden.
     CountShift,
-    /// A deleted golden no test names any more.
+    /// A deleted golden no test names any more, or one the cassette prune
+    /// lists.
     Retired,
+    /// A usage that gained a `cost`, reported or priced from the catalog.
+    CostAdded,
+    /// A text block that gained the `citations` its reply stated.
+    CitationsAdded,
 }
 
 impl fmt::Display for Change {
@@ -61,6 +68,8 @@ impl fmt::Display for Change {
             Self::Rebatched => "delivery rebatched",
             Self::CountShift => "count shift",
             Self::Retired => "golden retired",
+            Self::CostAdded => "cost added to usage",
+            Self::CitationsAdded => "citations added to text",
         })
     }
 }
@@ -123,11 +132,21 @@ impl Audit {
                         }
                         Some("toolcall") => {
                             let streamed = arguments.remove(&part).unwrap_or_default();
-                            let parsed = match streamed.trim() {
-                                "" => Some(Value::Object(serde_json::Map::new())),
-                                json => serde_json::from_str(json).ok(),
-                            };
-                            parsed.as_ref() == content.pointer("/function/arguments")
+                            // Arguments that were not a JSON object end as the
+                            // text they arrived as, verbatim.
+                            match content
+                                .pointer("/function/invalid_arguments")
+                                .and_then(Value::as_str)
+                            {
+                                Some(raw) => raw == streamed,
+                                None => {
+                                    let parsed = match streamed.trim() {
+                                        "" => Some(Value::Object(serde_json::Map::new())),
+                                        json => serde_json::from_str(json).ok(),
+                                    };
+                                    parsed.as_ref() == content.pointer("/function/arguments")
+                                }
+                            }
                         }
                         _ => continue,
                     };
@@ -145,6 +164,28 @@ impl Audit {
 }
 
 /// The event an item carries, when it is one.
+/// The one key `new` adds to `old` that the fold now normalizes: a usage's
+/// `cost`, or a text block's `citations`.
+fn normalized(
+    old: &serde_json::Map<String, Value>,
+    new: &serde_json::Map<String, Value>,
+    at: &str,
+) -> Option<(Change, &'static str)> {
+    let mut added = new.keys().filter(|key| !old.contains_key(*key));
+    let (Some(key), None) = (added.next(), added.next()) else {
+        return None;
+    };
+    match key.as_str() {
+        "cost" if at.ends_with("/usage") || at.ends_with("::Usage") => {
+            Some((Change::CostAdded, "cost"))
+        }
+        "citations" if new.get("type").and_then(Value::as_str) == Some("text") => {
+            Some((Change::CitationsAdded, "citations"))
+        }
+        _ => None,
+    }
+}
+
 fn event_of(item: &Value) -> Option<&Value> {
     (item.get("item").and_then(Value::as_str) == Some("event"))
         .then(|| item.get("value"))
@@ -422,6 +463,13 @@ impl<'a> File<'a> {
         match (base, head) {
             (Value::Object(old), Value::Object(new)) => {
                 if self.restored_call(base, head, at) {
+                    return;
+                }
+                if let Some((change, key)) = normalized(old, new, at) {
+                    self.audit.count(change, 1);
+                    let mut rest = new.clone();
+                    rest.shift_remove(key);
+                    self.compare(base, &Value::Object(rest), at, validated);
                     return;
                 }
                 if old.keys().ne(new.keys()) {
@@ -735,7 +783,7 @@ impl<'a> File<'a> {
         let strip = |error: &Value| {
             let mut error = error.clone();
             if let Some(object) = error.as_object_mut() {
-                object.remove("item");
+                object.shift_remove("item");
             }
             error
         };
@@ -758,19 +806,61 @@ impl<'a> File<'a> {
 /// Whether no test or source names a deleted golden any more, so its
 /// producer went with it.
 fn retired(root: &Path, path: &str) -> Result<bool, String> {
-    let Some(name) = Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_suffix(".effects.json"))
-    else {
+    let file = Path::new(path).file_name().and_then(|name| name.to_str());
+    let Some(name) = file.and_then(|name| {
+        name.strip_suffix(".effects.json")
+            .or_else(|| name.strip_suffix(".programs.json"))
+    }) else {
         return Ok(false);
     };
-    let named = git(
+    let world = Path::new(path)
+        .parent()
+        .and_then(|dir| dir.file_name())
+        .is_some_and(|dir| dir == "world");
+    let label = if world {
+        format!("world/{name}")
+    } else {
+        name.to_owned()
+    };
+    // The cassette prune lists every golden it deleted, with its producer.
+    let manifest = std::fs::read_to_string(root.join(super::prune::MANIFEST)).unwrap_or_default();
+    if manifest.lines().any(|line| {
+        line.strip_prefix("golden\t")
+            .and_then(|rest| rest.split('\t').next())
+            == Some(&label)
+    }) {
+        return Ok(true);
+    }
+    let named = output(
         root,
+        "git",
         &["grep", "-l", "-F", &format!("\"{name}\""), "--", "*.rs"],
     );
     // `git grep` exits 1, an error here, when nothing matches.
     Ok(named.is_err_and(|error| !error.contains("fatal")))
+}
+
+/// The fixtures (`<provider>/<scenario>.yaml`) the cassette prune lists.
+fn pruned_fixtures(root: &Path) -> BTreeSet<String> {
+    std::fs::read_to_string(root.join(super::prune::MANIFEST))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.strip_prefix("fixture\t"))
+        .filter_map(|rest| rest.split('\t').next())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether a corpus file is a pruned fixture or one of its sidecars.
+fn pruned_file(path: &str, pruned: &BTreeSet<String>) -> bool {
+    let Some(relative) = path.strip_prefix("crates/rig-cassette/fixtures/cassettes/") else {
+        return false;
+    };
+    let stem = relative
+        .strip_suffix(".yaml")
+        .or_else(|| relative.strip_suffix(".requests.json"))
+        .or_else(|| relative.strip_suffix(".clock.json"));
+    stem.is_some_and(|stem| pruned.contains(&format!("{stem}.yaml")))
 }
 
 /// Whether an effect streamed: a completion requested as a stream, or one
@@ -786,7 +876,7 @@ fn streamed(effect: &serde_json::Map<String, Value>) -> bool {
 fn without_raw(outcome: &Value) -> Value {
     let mut outcome = outcome.clone();
     if let Some(ok) = outcome.get_mut("Ok").and_then(Value::as_object_mut) {
-        ok.remove("raw");
+        ok.shift_remove("raw");
     }
     outcome
 }
@@ -813,27 +903,7 @@ fn finalized(part: &Part<'_>) -> String {
 /// and in path order. It reads the files, not git, so a golden not yet
 /// committed is checked too.
 pub(crate) fn goldens(root: &Path) -> Result<Vec<(String, Value)>, String> {
-    let mut paths = Vec::new();
-    let mut directories = vec![root.join(EFFECTS)];
-    while let Some(directory) = directories.pop() {
-        let entries =
-            std::fs::read_dir(&directory).map_err(|e| format!("{}: {e}", directory.display()))?;
-        for entry in entries {
-            let path = entry
-                .map_err(|e| format!("{}: {e}", directory.display()))?
-                .path();
-            if path.is_dir() {
-                directories.push(path);
-            } else if path
-                .extension()
-                .is_some_and(|extension| extension == "json")
-            {
-                paths.push(path);
-            }
-        }
-    }
-    paths.sort();
-    paths
+    crate::support::files_under(&root.join(EFFECTS), Some("json"))?
         .into_iter()
         .map(|path| {
             let relative = path
@@ -857,7 +927,11 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<(), String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    let status = git(root, &["diff", "--name-status", &base, "--", EFFECTS])?;
+    let status = output(
+        root,
+        "git",
+        &["diff", "--name-status", &base, "--", EFFECTS],
+    )?;
     let mut changed = Vec::new();
     let mut audit = Audit::default();
     for line in status.lines() {
@@ -869,20 +943,32 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<(), String> {
             _ => audit.other(line, "unreadable golden status"),
         }
     }
-    let cassettes = git(
+    let cassette_status = output(
         root,
+        "git",
         &[
             "diff",
-            "--name-only",
+            "--name-status",
             &base,
             "--",
             "crates/rig-cassette/fixtures/cassettes",
         ],
     )?;
+    let pruned = pruned_fixtures(root);
+    let mut pruned_files = 0;
+    let mut cassettes = Vec::new();
+    for line in cassette_status.lines() {
+        let mut fields = line.split('\t');
+        match (fields.next(), fields.next()) {
+            (Some("D"), Some(path)) if pruned_file(path, &pruned) => pruned_files += 1,
+            (_, Some(path)) => cassettes.push(path),
+            _ => cassettes.push(line),
+        }
+    }
     for (path, head) in goldens(root)? {
         let path = path.as_str();
         let base = if changed.contains(&path) {
-            let text = git(root, &["show", &format!("{base}:{path}")])?;
+            let text = output(root, "git", &["show", &format!("{base}:{path}")])?;
             match serde_json::from_str::<Value>(&text) {
                 Ok(base) => Some(base),
                 Err(error) => {
@@ -904,11 +990,14 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<(), String> {
     }
     println!("other: {}", audit.other.len());
     println!("mismatches: {}", audit.mismatches.len());
-    println!("cassettes changed: {}", cassettes.lines().count());
+    println!("cassettes changed: {}", cassettes.len());
+    if pruned_files > 0 {
+        println!("cassette files the prune deleted: {pruned_files}");
+    }
     for problem in audit.mismatches.iter().chain(&audit.other).take(40) {
         println!("  {problem}");
     }
-    if audit.other.is_empty() && audit.mismatches.is_empty() && cassettes.trim().is_empty() {
+    if audit.other.is_empty() && audit.mismatches.is_empty() && cassettes.is_empty() {
         Ok(())
     } else {
         Err("the golden audit failed".into())

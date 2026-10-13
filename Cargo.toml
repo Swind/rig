@@ -124,6 +124,7 @@ members = [
     "xtask",
     "test-support/service-tests",
     "test-support/rig-test-support",
+    "test-support/rig-history-conformance",
 ]
 # The root manifest is itself the `rig` facade package, so without an
 # explicit `default-members` a bare `cargo nextest run` resolved to the
@@ -141,8 +142,8 @@ members = [
 # `cargo test -p rig-core --test macro_hygiene` step. Both are required for
 # this exclusion to stay honest: until the first existed, every test in
 # rig-derive ran nowhere.
-# The nested cassette runner is selected separately by bus-verification and
-# ecs-parity: default-member feature unification defeats its minimal JSON graph.
+# The nested cassette runner is selected separately by bus-verification:
+# default-member feature unification defeats its minimal JSON graph.
 default-members = [
     ".",
     "crates/rig-core",
@@ -150,7 +151,6 @@ default-members = [
     "crates/rig-agent",
     "crates/rig-messaging",
     "crates/rig-messaging-platforms",
-    "crates/rig-ecs",
     "crates/rig-http",
     "crates/rig-reqwest",
     "crates/rig-tungstenite",
@@ -160,6 +160,7 @@ default-members = [
     "crates/rig-gemini-grpc",
     "test-support/service-tests",
     "test-support/rig-test-support",
+    "test-support/rig-history-conformance",
     # The design record's Frozen API programs: clippy and the full test
     # lane compile them.
     "examples/frozen_api",
@@ -176,6 +177,9 @@ exclude = [
     # Excluding it keeps that subtree out of the workspace lockfile.
     "examples/discord_bot",
     "examples/messaging_discord",
+    # Only the frozen release changelog of the removed rig-ecs crate remains;
+    # the release PR deletes it.
+    "crates/rig-ecs",
 ]
 
 [workspace.lints.rust]
@@ -223,7 +227,7 @@ opt-level = "s"
 
 
 [workspace.package]
-version = "0.43.0"
+version = "0.44.0"
 edition = "2024"
 # The toolchain in rust-toolchain.toml, the only one CI builds with.
 rust-version = "1.98.1"
@@ -251,13 +255,13 @@ unicode-segmentation = "1"
 #
 # The `rig` facade is the workspace-root package; examples depend on it via
 # `rig.workspace = true` (add per-example features at the use site).
-rig = { path = ".", version = "0.43.0" }
-rig-agent = { path = "crates/rig-agent", version = "0.43.0" }
-rig-messaging = { path = "crates/rig-messaging", version = "0.43.0" }
-rig-reqwest = { path = "crates/rig-reqwest", version = "0.43.0" }
-rig-rmcp = { path = "crates/rig-rmcp", version = "0.43.0" }
-rig-core = { path = "crates/rig-core", version = "0.43.0" }
-rig-cassette = { path = "crates/rig-cassette", version = "0.43.0", default-features = false }
+rig = { path = ".", version = "0.44.0" }
+rig-agent = { path = "crates/rig-agent", version = "0.44.0" }
+rig-messaging = { path = "crates/rig-messaging", version = "0.44.0" }
+rig-reqwest = { path = "crates/rig-reqwest", version = "0.44.0" }
+rig-rmcp = { path = "crates/rig-rmcp", version = "0.44.0" }
+rig-core = { path = "crates/rig-core", version = "0.44.0" }
+rig-cassette = { path = "crates/rig-cassette", version = "0.44.0", default-features = false }
 anyhow = "1"
 arrow-array = "58"
 assert_fs = "1"
@@ -267,6 +271,7 @@ aws-config = { version = "1", default-features = false }
 # 1.124: `OutputConfig`/`ServiceTier`/citations types rig-bedrock maps.
 aws-sdk-bedrockruntime = { version = "1.124", default-features = false }
 aws-smithy-eventstream = "0.60"
+aws-smithy-http-client = { version = "1", default-features = false }
 aws-smithy-runtime-api = "1"
 aws-smithy-types = "1"
 base64 = "0.22"
@@ -283,21 +288,10 @@ ethers = "2"
 fastembed = { version = "4.5", default-features = false }
 fastrand = "2"
 futures = "0.3"
-# Runtime-agnostic executor used by the `agent_no_tokio` example, and the
-# pool rig-ecs runs handler futures on. Bevy 0.19.1: crates.io, never git;
-# the tooling check verifies Bevy sources and declared release floors. Each crate has default
-# features off and only what rig-ecs needs: the `bus` module's three, and
-# `bevy_reflect` / `bevy_asset` behind rig-ecs's `reflect` / `assets`
-# features (the inspector's view of the graph; prompts and tool
-# definitions as assets).
+# Runtime-agnostic executor used by the `agent_no_tokio` example. Bevy
+# 0.19.1: crates.io, never git; the tooling check verifies Bevy sources and
+# declared release floors. Default features off.
 bevy_tasks = { version = "0.19.1", default-features = false, features = ["multi_threaded"] }
-bevy_platform = { version = "0.19.1", default-features = false }
-bevy_ecs = { version = "0.19.1", default-features = false, features = ["std", "multi_threaded"] }
-bevy_app = { version = "0.19.1", default-features = false, features = ["std"] }
-bevy_reflect = { version = "0.19.1", default-features = false, features = ["std"] }
-bevy_asset = { version = "0.19.1", default-features = false }
-bevy_time = { version = "0.19.1", default-features = false, features = ["std", "bevy_reflect"] }
-bevy_diagnostic = { version = "0.19.1", default-features = false, features = ["std"] }
 futures-timer = "3"
 glob = "0.3"
 google-cloud-auth = "1"
@@ -308,6 +302,7 @@ google-cloud-aiplatform-v1 = { version = "1.8", default-features = false, featur
     "prediction-service",
 ] }
 http = "1"
+http-body = "1"
 httpdate = "1"
 # 0.8.2: `Recording::export_async` (cassette harness).
 httpmock = "0.8.2"
@@ -375,6 +370,8 @@ tonic-build = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 prost = "0.14"
+prost-reflect = { version = "0.16", features = ["serde"] }
+prost-types = "0.14"
 tracing = "0.1"
 # 0.2.5: `Instrumented<S>: Stream` under `futures-03` for futures 0.3 stable.
 tracing-futures = "0.2.5"
@@ -394,30 +391,30 @@ exclude-members = ["crates/rig-core", "crates/rig-derive"]
 workspace = true
 
 [dependencies]
-rig-typesafeai = { path = "crates/rig-typesafeai", version = "0.43.0", optional = true, default-features = false }
-rig-core = { path = "crates/rig-core", version = "0.43.0", default-features = false }
-rig-cassette = { path = "crates/rig-cassette", version = "0.43.0", optional = true, default-features = false }
-rig-reqwest = { path = "crates/rig-reqwest", version = "0.43.0", optional = true, default-features = false }
-rig-agent = { path = "crates/rig-agent", version = "0.43.0", optional = true, default-features = false }
-rig-rmcp = { path = "crates/rig-rmcp", version = "0.43.0", optional = true }
-rig-bedrock = { path = "crates/rig-bedrock", version = "0.43.0", optional = true, default-features = false }
-rig-candle = { path = "crates/rig-candle", version = "0.43.0", optional = true, default-features = false }
-rig-fastembed = { path = "crates/rig-fastembed", version = "0.43.0", optional = true, default-features = false }
-rig-gemini-grpc = { path = "crates/rig-gemini-grpc", version = "0.43.0", optional = true, default-features = false }
-rig-helixdb = { path = "crates/rig-helixdb", version = "0.43.0", optional = true, default-features = false }
-rig-lancedb = { path = "crates/rig-lancedb", version = "0.43.0", optional = true, default-features = false }
-rig-memory = { path = "crates/rig-memory", version = "0.43.0", optional = true, default-features = false }
-rig-derive = { path = "crates/rig-derive", version = "0.43.0", optional = true }
-rig-milvus = { path = "crates/rig-milvus", version = "0.43.0", optional = true, default-features = false }
-rig-mongodb = { path = "crates/rig-mongodb", version = "0.43.0", optional = true, default-features = false }
-rig-neo4j = { path = "crates/rig-neo4j", version = "0.43.0", optional = true, default-features = false }
-rig-postgres = { path = "crates/rig-postgres", version = "0.43.0", optional = true, default-features = false }
-rig-qdrant = { path = "crates/rig-qdrant", version = "0.43.0", optional = true, default-features = false }
-rig-s3vectors = { path = "crates/rig-s3vectors", version = "0.43.0", optional = true, default-features = false }
-rig-scylladb = { path = "crates/rig-scylladb", version = "0.43.0", optional = true, default-features = false }
-rig-sqlite = { path = "crates/rig-sqlite", version = "0.43.0", optional = true, default-features = false }
-rig-vectorize = { path = "crates/rig-vectorize", version = "0.43.0", optional = true, default-features = false }
-rig-vertexai = { path = "crates/rig-vertexai", version = "0.43.0", optional = true, default-features = false }
+rig-typesafeai = { path = "crates/rig-typesafeai", version = "0.44.0", optional = true, default-features = false }
+rig-core = { path = "crates/rig-core", version = "0.44.0", default-features = false }
+rig-cassette = { path = "crates/rig-cassette", version = "0.44.0", optional = true, default-features = false }
+rig-reqwest = { path = "crates/rig-reqwest", version = "0.44.0", optional = true, default-features = false }
+rig-agent = { path = "crates/rig-agent", version = "0.44.0", optional = true, default-features = false }
+rig-rmcp = { path = "crates/rig-rmcp", version = "0.44.0", optional = true }
+rig-bedrock = { path = "crates/rig-bedrock", version = "0.44.0", optional = true, default-features = false }
+rig-candle = { path = "crates/rig-candle", version = "0.44.0", optional = true, default-features = false }
+rig-fastembed = { path = "crates/rig-fastembed", version = "0.44.0", optional = true, default-features = false }
+rig-gemini-grpc = { path = "crates/rig-gemini-grpc", version = "0.44.0", optional = true, default-features = false }
+rig-helixdb = { path = "crates/rig-helixdb", version = "0.44.0", optional = true, default-features = false }
+rig-lancedb = { path = "crates/rig-lancedb", version = "0.44.0", optional = true, default-features = false }
+rig-memory = { path = "crates/rig-memory", version = "0.44.0", optional = true, default-features = false }
+rig-derive = { path = "crates/rig-derive", version = "0.44.0", optional = true }
+rig-milvus = { path = "crates/rig-milvus", version = "0.44.0", optional = true, default-features = false }
+rig-mongodb = { path = "crates/rig-mongodb", version = "0.44.0", optional = true, default-features = false }
+rig-neo4j = { path = "crates/rig-neo4j", version = "0.44.0", optional = true, default-features = false }
+rig-postgres = { path = "crates/rig-postgres", version = "0.44.0", optional = true, default-features = false }
+rig-qdrant = { path = "crates/rig-qdrant", version = "0.44.0", optional = true, default-features = false }
+rig-s3vectors = { path = "crates/rig-s3vectors", version = "0.44.0", optional = true, default-features = false }
+rig-scylladb = { path = "crates/rig-scylladb", version = "0.44.0", optional = true, default-features = false }
+rig-sqlite = { path = "crates/rig-sqlite", version = "0.44.0", optional = true, default-features = false }
+rig-vectorize = { path = "crates/rig-vectorize", version = "0.44.0", optional = true, default-features = false }
+rig-vertexai = { path = "crates/rig-vertexai", version = "0.44.0", optional = true, default-features = false }
 
 # The bundled websocket backend is native-only (tungstenite needs a tokio
 # reactor and raises a `compile_error!` on wasm), so it is scoped to non-wasm
@@ -435,27 +432,24 @@ rig-vertexai = { path = "crates/rig-vertexai", version = "0.43.0", optional = tr
 # here would let `--no-default-features --features websocket` compile a
 # TLS-less backend that fails every handshake at runtime.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-rig-conversation-store = { path = "crates/rig-conversation-store", version = "0.43.0", optional = true, default-features = false }
-rig-ladybug = { path = "crates/rig-ladybug", version = "0.43.0", optional = true, default-features = false }
-rig-messaging = { path = "crates/rig-messaging", version = "0.43.0", optional = true }
-rig-messaging-platforms = { path = "crates/rig-messaging-platforms", version = "0.43.0", optional = true }
-rig-qdrant-edge = { path = "crates/rig-qdrant-edge", version = "0.43.0", optional = true, default-features = false }
-rig-tungstenite = { path = "crates/rig-tungstenite", version = "0.43.0", optional = true }
+rig-conversation-store = { path = "crates/rig-conversation-store", version = "0.44.0", optional = true, default-features = false }
+rig-ladybug = { path = "crates/rig-ladybug", version = "0.44.0", optional = true, default-features = false }
+rig-messaging = { path = "crates/rig-messaging", version = "0.44.0", optional = true }
+rig-messaging-platforms = { path = "crates/rig-messaging-platforms", version = "0.44.0", optional = true }
+rig-qdrant-edge = { path = "crates/rig-qdrant-edge", version = "0.44.0", optional = true, default-features = false }
+rig-tungstenite = { path = "crates/rig-tungstenite", version = "0.44.0", optional = true }
 
 [dev-dependencies]
 rig-test-support = { path = "test-support/rig-test-support" }
+rig-history-conformance = { path = "test-support/rig-history-conformance" }
 # The facade's tests use the recorder directly, whatever `cassette` is set to.
 rig-cassette = { path = "crates/rig-cassette", default-features = false, features = ["agent"] }
-bevy_app = { workspace = true }
-bevy_ecs = { workspace = true }
-# The ECS contract matrix (`crates/rig-cassette/tests/common/ecs_matrix.rs`) pins the bus's task pool to one thread, as the cassette crate's world interpreter does.
-bevy_tasks = { workspace = true }
 anyhow = { workspace = true }
 assert_fs = { workspace = true }
-rig-core = { path = "crates/rig-core", version = "0.43.0", default-features = false, features = [
+rig-core = { path = "crates/rig-core", version = "0.44.0", default-features = false, features = [
   "test-utils",
 ] }
-rig-agent = { path = "crates/rig-agent", version = "0.43.0", default-features = false, features = [
+rig-agent = { path = "crates/rig-agent", version = "0.44.0", default-features = false, features = [
   "test-utils",
 ] }
 tokio = { workspace = true, features = ["full"] }

@@ -15,15 +15,11 @@ rig-core = "0.42.0"
 You can also run `cargo add rig-vertexai rig-core` to add the most recent versions of the dependencies to your project.
 
 See the [`/examples`](./examples) folder for usage examples.
-[`ecs_host_model`](examples/ecs_host_model.rs) shows retained-runtime SDK
-preparation and per-poll runtime context on ECS workers, with explicit shutdown
-ordering. It makes a live, potentially billable call when run; compilation alone
-is not an authentication or service test.
-
 ## Raw responses
 
-A response's `raw` is the SDK's `GenerateContentResponse`, serialized. It can
-be recovered from a normalized response without another RPC:
+A response's `raw` is the reply's REST JSON: the SDK's `GenerateContentResponse`
+serialized, with enum values spelled by name. It can be recovered from a
+normalized response without another RPC:
 
 ```rust
 use google_cloud_aiplatform_v1::model::GenerateContentResponse;

@@ -74,6 +74,7 @@ impl Wire for Embeddings {
     type Payload = crate::wire::Encoded;
     type Frame = crate::wire::WireFrame;
     type Decoder<'id> = EmbeddingsDecoder;
+    type Reassembler = crate::wire::document::Unreassembled;
 
     fn describe(&self) -> Descriptor<'_> {
         Descriptor::new(super::PROVIDER_NAME)
@@ -143,22 +144,15 @@ impl<'id> Decoder<'id, crate::operation::Embedding> for EmbeddingsDecoder {
         event: Self::Event,
         out: Out<'id, crate::operation::Embedding>,
     ) -> Result<Flow, ProviderError> {
-        let vectors = event
-            .embeddings
-            .into_iter()
-            .map(|embedding| embeddings::Embedding {
-                // The document each vector belongs to is not on this wire;
-                // the operation's fold pairs the batch back on by position.
-                document: String::new(),
-                vec: embedding
-                    .values
-                    .into_iter()
-                    .filter_map(|value| value.as_f64())
-                    .collect(),
-            })
-            .collect();
+        let vectors = event.embeddings.into_iter().map(|embedding| {
+            embedding
+                .values
+                .into_iter()
+                .filter_map(|value| value.as_f64())
+                .collect()
+        });
         // Gemini supplies no usage or response id; the driver attaches the raw body.
-        Ok(out.end(embeddings::EmbeddingResponse::new(vectors)))
+        Ok(out.end(embeddings::EmbeddingResponse::from_vectors(vectors)))
     }
 }
 
@@ -181,6 +175,14 @@ pub mod gemini_api_types {
     pub struct EmbeddingValues {
         #[serde(default)]
         pub values: Vec<serde_json::Number>,
+    }
+}
+
+impl super::GeminiConfig {
+    /// The `batchEmbedContents` embedding wire. `ndims` defaults from the
+    /// model identifier.
+    pub(crate) fn embedding(&self, model: impl Into<String>, ndims: Option<usize>) -> Embeddings {
+        Embeddings::new(self.clone(), model, ndims)
     }
 }
 

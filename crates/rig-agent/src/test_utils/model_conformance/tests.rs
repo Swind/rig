@@ -16,12 +16,10 @@ fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> AssistantCon
 }
 
 fn usage(input: u64, output: u64) -> Usage {
-    Usage {
-        input_tokens: Some(input),
-        output_tokens: Some(output),
-        total_tokens: Some(input + output),
-        ..Usage::default()
-    }
+    Usage::new()
+        .input_tokens(input)
+        .output_tokens(output)
+        .total_tokens(input + output)
 }
 
 fn fixture_contract(condition: bool, details: &str) -> Result<(), ScenarioError> {
@@ -185,10 +183,11 @@ fn typed_validators_reject_bad_structured_output_and_protocol_leaks() {
     let invalid = decode_structured_output::<ConfigOutput>("invalid_json", "not json");
     assert!(matches!(invalid, Err(ScenarioError::Contract { .. })));
 
-    let messages = vec![Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::text("visible <tool_call>")],
-    }];
+    let messages = vec![Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![AssistantContent::text(
+            "visible <tool_call>",
+        )]),
+    )];
     let hygiene = validate_protocol_hygiene(
         "protocol_hygiene",
         "visible <tool_call>",
@@ -200,14 +199,13 @@ fn typed_validators_reject_bad_structured_output_and_protocol_leaks() {
 
 #[test]
 fn invalid_tool_diagnostics_require_rejected_call_history() {
-    let history = vec![Message::Assistant {
-        id: None,
-        content: vec![tool_call(
+    let history = vec![Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![tool_call(
             "bad_call",
             "missing",
             serde_json::json!({"value": 1}),
-        )],
-    }];
+        )]),
+    )];
     let error = PromptError::UnknownToolCall {
         tool_name: "missing".to_string(),
         available_tools: vec!["add".to_string()],

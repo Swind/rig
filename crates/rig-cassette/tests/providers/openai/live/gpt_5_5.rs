@@ -29,10 +29,8 @@ struct Gpt55Event {
     summary: String,
 }
 
-fn gpt_5_5_reasoning_params() -> serde_json::Value {
-    serde_json::json!({
-        "reasoning": { "effort": "xhigh" }
-    })
+fn gpt_5_5_reasoning_options() -> rig::completion::GenerationOptions {
+    super::super::support::effort(rig::completion::Effort::XHigh)
 }
 
 #[tokio::test]
@@ -47,7 +45,7 @@ async fn responses_prompt_smoke() {
         .prompt(BASIC_PROMPT)
         .await
         .expect("prompt should succeed")
-        .output;
+        .output();
 
     assert_nonempty_response(&response);
 }
@@ -82,7 +80,7 @@ async fn responses_tools_smoke() {
         .prompt(TOOLS_PROMPT)
         .await
         .expect("tool prompt should succeed")
-        .output;
+        .output();
 
     assert_mentions_expected_number(&response, -3);
 }
@@ -128,7 +126,7 @@ async fn responses_structured_output_smoke() {
         .prompt("Return a concise event object for a local Rust meetup in Seattle.")
         .await
         .expect("output schema prompt should succeed")
-        .output;
+        .output();
     let structured: SmokeStructuredOutput =
         serde_json::from_str(&response).expect("structured output should deserialize");
     assert_smoke_structured_output(&structured);
@@ -176,7 +174,7 @@ async fn responses_image_input_smoke() {
         .build();
     let image_bytes = std::fs::read(IMAGE_FIXTURE_PATH).expect("fixture image should be readable");
     let image = Image {
-        data: DocumentSourceKind::base64(&BASE64_STANDARD.encode(image_bytes)),
+        data: DocumentSourceKind::base64(BASE64_STANDARD.encode(image_bytes)),
         media_type: Some(ImageMediaType::JPEG),
         detail: Some(ImageDetail::Auto),
         ..Default::default()
@@ -186,7 +184,7 @@ async fn responses_image_input_smoke() {
         .prompt(image)
         .await
         .expect("image prompt should succeed")
-        .output;
+        .output();
 
     assert_nonempty_response(&response);
     assert_contains_any_case_insensitive(&response, &["ant", "insect"]);
@@ -196,10 +194,10 @@ async fn responses_image_input_smoke() {
 #[ignore = "requires OPENAI_API_KEY"]
 async fn responses_reasoning_nonstreaming_smoke() {
     let client = OpenAiModels::from_env().expect("config should build from env");
-    reasoning::run_reasoning_roundtrip_nonstreaming(ReasoningRoundtripAgent::new(
-        client.completion(openai::GPT_5_5),
-        Some(gpt_5_5_reasoning_params()),
-    ))
+    reasoning::run_reasoning_roundtrip_nonstreaming(
+        ReasoningRoundtripAgent::new(client.completion(openai::GPT_5_5), None)
+            .with_options(gpt_5_5_reasoning_options()),
+    )
     .await;
 }
 
@@ -207,10 +205,10 @@ async fn responses_reasoning_nonstreaming_smoke() {
 #[ignore = "requires OPENAI_API_KEY"]
 async fn responses_reasoning_streaming_smoke() {
     let client = OpenAiModels::from_env().expect("config should build from env");
-    reasoning::run_reasoning_roundtrip_streaming(ReasoningRoundtripAgent::new(
-        client.completion(openai::GPT_5_5),
-        Some(gpt_5_5_reasoning_params()),
-    ))
+    reasoning::run_reasoning_roundtrip_streaming(
+        ReasoningRoundtripAgent::new(client.completion(openai::GPT_5_5), None)
+            .with_options(gpt_5_5_reasoning_options()),
+    )
     .await;
 }
 
@@ -223,14 +221,14 @@ async fn responses_reasoning_tool_roundtrip_smoke() {
         .preamble(reasoning::TOOL_SYSTEM_PROMPT)
         .max_tokens(4096)
         .tool(WeatherTool::new(call_count.clone()))
-        .additional_params(gpt_5_5_reasoning_params())
+        .options(gpt_5_5_reasoning_options())
         .build();
 
     let result = agent
         .chat(reasoning::TOOL_USER_PROMPT, &mut Vec::<Message>::new())
         .await
         .expect("reasoning tool chat should succeed")
-        .output;
+        .output();
 
     reasoning::assert_nonstreaming_universal(&result, &call_count, "openai");
 }
@@ -244,7 +242,7 @@ async fn responses_reasoning_streaming_tool_roundtrip_smoke() {
         .preamble(reasoning::TOOL_SYSTEM_PROMPT)
         .max_tokens(4096)
         .tool(WeatherTool::new(call_count.clone()))
-        .additional_params(gpt_5_5_reasoning_params())
+        .options(gpt_5_5_reasoning_options())
         .build();
 
     let stream = agent
@@ -271,7 +269,7 @@ async fn chat_completions_prompt_smoke() {
         .prompt(BASIC_PROMPT)
         .await
         .expect("chat completions prompt should succeed")
-        .output;
+        .output();
 
     assert_nonempty_response(&response);
 }
@@ -310,7 +308,7 @@ async fn chat_completions_tools_smoke() {
         .prompt(TOOLS_PROMPT)
         .await
         .expect("chat completions tool prompt should succeed")
-        .output;
+        .output();
 
     assert_mentions_expected_number(&response, -3);
 }
@@ -349,7 +347,7 @@ async fn chat_completions_structured_output_smoke() {
         .prompt("Return a concise event object for a local Rust meetup in Seattle.")
         .await
         .expect("chat completions output schema prompt should succeed")
-        .output;
+        .output();
     let structured: SmokeStructuredOutput =
         serde_json::from_str(&response).expect("structured output should deserialize");
 
@@ -402,7 +400,7 @@ async fn chat_completions_image_input_smoke() {
         .build();
     let image_bytes = std::fs::read(IMAGE_FIXTURE_PATH).expect("fixture image should be readable");
     let image = Image {
-        data: DocumentSourceKind::base64(&BASE64_STANDARD.encode(image_bytes)),
+        data: DocumentSourceKind::base64(BASE64_STANDARD.encode(image_bytes)),
         media_type: Some(ImageMediaType::JPEG),
         detail: Some(ImageDetail::Auto),
         ..Default::default()
@@ -412,7 +410,7 @@ async fn chat_completions_image_input_smoke() {
         .prompt(image)
         .await
         .expect("chat completions image prompt should succeed")
-        .output;
+        .output();
 
     assert_nonempty_response(&response);
     assert_contains_any_case_insensitive(&response, &["ant", "insect"]);
@@ -432,25 +430,22 @@ async fn responses_websocket_smoke() -> anyhow::Result<()> {
     loop {
         match session.next_event().await? {
             ResponsesWebSocketEvent::Item(item) => {
-                if let rig::providers::openai::responses_api::streaming::ItemChunkKind::OutputTextDelta(delta) =
-                    item.data
+                if item["type"] == "response.output_text.delta"
+                    && let Some(delta) = item["delta"].as_str()
                 {
-                    streamed_text.push_str(&delta.delta);
+                    streamed_text.push_str(delta);
                 }
             }
-            ResponsesWebSocketEvent::Response(chunk) => {
-                if matches!(
-                    chunk.kind,
-                    rig::providers::openai::responses_api::streaming::ResponseChunkKind::ResponseCompleted
-                        | rig::providers::openai::responses_api::streaming::ResponseChunkKind::ResponseFailed
-                        | rig::providers::openai::responses_api::streaming::ResponseChunkKind::ResponseIncomplete
-                ) {
+            event @ ResponsesWebSocketEvent::Response { .. } => {
+                if event.is_terminal() {
                     break;
                 }
             }
             // Unknown frames are raw passthrough noise for this live assertion.
             ResponsesWebSocketEvent::Done(_) | ResponsesWebSocketEvent::Unknown(_) => {}
-            ResponsesWebSocketEvent::Error(error) => return Err(anyhow::anyhow!(error.to_string())),
+            ResponsesWebSocketEvent::Error(error) => {
+                return Err(anyhow::anyhow!(error.to_string()));
+            }
         }
     }
 

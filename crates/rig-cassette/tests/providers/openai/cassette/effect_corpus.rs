@@ -45,13 +45,15 @@ fn tool_calls(log: &rig::cassette::effect_log::EffectLog) -> Vec<rig::message::T
 fn assert_dual_ids(calls: &[rig::message::ToolCall]) {
     assert!(!calls.is_empty(), "the program calls tools");
     for call in calls {
-        let provider = call
-            .id
-            .provider()
-            .unwrap_or_else(|| panic!("a Responses call carries a provider id: {call:?}"));
         assert!(
-            provider.item_id.is_some(),
-            "a Responses call carries the item id too: {call:?}"
+            call.id.provider().is_some(),
+            "a Responses call carries a provider id: {call:?}"
+        );
+        assert!(
+            call.native
+                .as_ref()
+                .is_some_and(|native| native.item["id"].is_string()),
+            "a Responses call carries its item, item id included: {call:?}"
         );
     }
 }
@@ -121,7 +123,7 @@ async fn tool_call_turns_effect_log_is_the_golden_fixture() {
             .max_turns(6)
             .await
             .expect("the agent answers");
-        assert!(response.output.contains("21"), "{}", response.output);
+        assert!(response.output().contains("21"), "{}", response.output());
         let log = agent.stamp(recorder.take());
         assert_eq!(
             families(&log),

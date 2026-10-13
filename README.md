@@ -95,13 +95,9 @@ unchanged in history; supported providers encode raw binary content when buildin
 requests. See the [attachment API](crates/rig-agent/README.md#attachments).
 
 Hosts construct HTTP or SDK models with their chosen authentication, transport
-policy and runtime lifetime; both agent runtimes execute the resulting
-`Model` through one shared adapter. ECS checkpoints retain execution
-state and handler descriptors, not provider launch recipes. Restoration
-explicitly validates the complete handler set against the original saved
-contracts or accepts intentional replacements. Effect replay uses recorded
-handlers and does not require live provider construction. See the
-[ECS host/restoration contract](crates/rig-ecs/CONTRACT.md#121-host-assembly-runtime-execution).
+policy and runtime lifetime; the agent runtime executes the resulting
+`Model` through one shared adapter. Effect replay uses recorded handlers and
+does not require live provider construction.
 
 ## Who is using Rig?
 Below is a non-exhaustive list of companies and people who are using Rig:
@@ -150,7 +146,7 @@ async fn main() -> Result<(), anyhow::Error> {
     // Prompt the agent and print the response
     let response = comedian_agent.prompt("Entertain me!").await?;
 
-    println!("{}", response.output);
+    println!("{}", response.output());
 
     Ok(())
 }
@@ -169,12 +165,17 @@ and attach its clone with `AgentBuilder::record_to`; import
 replay compatibility.
 
 For transport-free consumers, depend directly on `rig-cassette` with default
-features disabled. Its optional `agent` and `ecs` adapters are independent of
-each other and of the native `http` engine. Neither runtime depends on the
-concrete logging crate. See the [cassette README](crates/rig-cassette/README.md)
-for dependency guarantees, ECS replay installation and migration paths.
+features disabled. Its optional `agent` adapter is independent of the native
+`http` engine. The agent runtime does not depend on the concrete logging
+crate. See the [cassette README](crates/rig-cassette/README.md) for
+dependency guarantees and migration paths.
 
 ## Supported Integrations
+
+The built-in `rig::vector_store::in_memory_store::InMemoryVectorStore` stores
+serializable documents without requiring `Eq` or `Default`. Its custom ID
+callbacks accept closures that capture and mutate application state. See the
+[vector-search example](examples/vector_search/src/main.rs).
 
 The root `rig` facade exposes companion crates behind one feature per integration:
 

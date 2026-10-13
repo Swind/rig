@@ -16,6 +16,14 @@ use rig_core::{
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Notify;
 
+fn has_assistant_text(history: &[Message], expected: &str) -> bool {
+    history.iter().any(|message| {
+        matches!(message, Message::Assistant(turn)
+            if matches!(turn.content.as_slice(), [rig_core::message::AssistantContent::Text(text)]
+                if text.text == expected))
+    })
+}
+
 struct HoldFirstDelta {
     entered: Arc<Notify>,
     release: Arc<Notify>,
@@ -87,11 +95,10 @@ async fn same_session_waits_and_loads_complete_history() -> Result<(), Box<dyn s
     first.await??;
     second.await??;
     let requests = model.requests();
-    assert!(
-        requests[1]
-            .chat_history
-            .contains(&Message::assistant("first answer"))
-    );
+    assert!(has_assistant_text(
+        &requests[1].chat_history,
+        "first answer"
+    ));
     assert!(
         requests[1]
             .chat_history
@@ -130,11 +137,10 @@ async fn transport_failures_still_append_memory_and_clean_locks()
     adapter.fail_sends.store(0, Ordering::SeqCst);
     adapter.fail_edits.store(0, Ordering::SeqCst);
     router.handle(adapter, inbound("next"), "bot").await?;
-    assert!(
-        model.requests()[1]
-            .chat_history
-            .contains(&Message::assistant("persist me"))
-    );
+    assert!(has_assistant_text(
+        &model.requests()[1].chat_history,
+        "persist me"
+    ));
     Ok(())
 }
 
@@ -313,7 +319,10 @@ fn attachment_conversion_supports_each_media_kind_and_source() {
     for (i, item) in content.iter().skip(1).enumerate() {
         let data = match item {
             UserContent::Image(v) => Some(&v.data),
-            UserContent::Document(v) => Some(&v.data),
+            UserContent::Document(v) => match &v.data {
+                rig_core::message::DocumentData::File(source) => Some(source),
+                rig_core::message::DocumentData::Text(_) => None,
+            },
             UserContent::Audio(v) => Some(&v.data),
             UserContent::Video(v) => Some(&v.data),
             _ => None,
@@ -473,16 +482,14 @@ async fn arrival_during_cleanup_keeps_the_waiting_turns_lock()
         second.await??;
         third.await??;
         let requests = model.requests();
-        assert!(
-            requests[2]
-                .chat_history
-                .contains(&Message::assistant("first answer"))
-        );
-        assert!(
-            requests[2]
-                .chat_history
-                .contains(&Message::assistant("second answer"))
-        );
+        assert!(has_assistant_text(
+            &requests[2].chat_history,
+            "first answer"
+        ));
+        assert!(has_assistant_text(
+            &requests[2].chat_history,
+            "second answer"
+        ));
         assert!(router.locks.lock().await.is_empty());
         Ok::<_, Box<dyn std::error::Error>>(())
     })

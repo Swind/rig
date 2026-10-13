@@ -60,10 +60,57 @@ use cache_prefix::{EndpointKind, PrefixBlock, Violation};
 /// records that someone silenced the check, not why it is correct.
 const MOVES_CACHE_PREFIX: &[(&str, &str)] = &[
     (
+        "anthropic/corpus_shaping/tool_choice_none_on_committed_output.yaml",
+        "a request sends the conversation without tools, so the core turns its calls into text and the prefix moves (rule R4)",
+    ),
+    (
+        "deepseek/corpus_matrix/shaping_tool_choice_none_on_committed_output.yaml",
+        "a request sends the conversation without tools, so the core turns its calls into text and the prefix moves (rule R4)",
+    ),
+    (
+        "doubleword/corpus_matrix/shaping_tool_choice_none_on_committed_output.yaml",
+        "a request sends the conversation without tools, so the core turns its calls into text and the prefix moves (rule R4)",
+    ),
+    (
+        "venice/corpus_matrix/shaping_tool_choice_none_on_committed_output.yaml",
+        "a request sends the conversation without tools, so the core turns its calls into text and the prefix moves (rule R4)",
+    ),
+    (
+        "anthropic/context_binding/between_tools_after_tool_change.yaml",
+        "the cell pins how a turn made under the old tools replays after the tool list changes; the changed tool list is the behavior being recorded",
+    ),
+    (
+        "anthropic/context_binding/changed_system_with_drop_block.yaml",
+        "the cell pins that thinking bound to the old system prompt replays after it changes; the changed system prompt is the behavior being recorded",
+    ),
+    (
+        "anthropic/context_binding/changed_system_without_drop_block.yaml",
+        "the cell pins that thinking bound to the old system prompt is refused without the binding; the changed system prompt is the behavior being recorded",
+    ),
+    (
+        "anthropic/context_binding/changed_tools_without_drop_block.yaml",
+        "the cell pins that thinking bound to the old tools is refused without the binding; the changed tool list is the behavior being recorded",
+    ),
+    (
+        "anthropic/context_binding/changed_tools_with_drop_block.yaml",
+        "the cell pins that thinking bound to the old tools replays after the tool list changes; the changed tool list is the behavior being recorded",
+    ),
+    (
+        "openrouter/context_binding/amazon_bedrock.yaml",
+        "the cell pins that thinking bound to the old tools replays after the tool list changes; the changed tool list is the behavior being recorded",
+    ),
+    (
+        "openrouter/context_binding/anthropic.yaml",
+        "the cell pins that thinking bound to the old tools replays after the tool list changes; the changed tool list is the behavior being recorded",
+    ),
+    (
+        "openrouter/context_binding/google_vertex.yaml",
+        "the cell pins that thinking bound to the old tools replays after the tool list changes; the changed tool list is the behavior being recorded",
+    ),
+    (
         "anthropic/long_run_caching/dynamic_tools_30.yaml",
-        "the long run's request patch changes the active tools on turn 11; the \
-         changed tool list is the behavior being recorded (Claude Opus 5.5 \
-         refuses it with the thinking-block binding 400)",
+        "the long run's request patch changes the active tools on turns 11 \
+         and 21; the changed tool list is the behavior being recorded",
     ),
     (
         "anthropic/corpus_shaping/active_tools_none_second_turn.yaml",
@@ -78,7 +125,7 @@ const MOVES_CACHE_PREFIX: &[(&str, &str)] = &[
     ),
     (
         "openai/corpus_matrix_chat/shaping_active_tools_none_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch drops every tool on the second turn",
     ),
     (
@@ -101,57 +148,57 @@ const MOVES_CACHE_PREFIX: &[(&str, &str)] = &[
     ),
     (
         "openai/corpus_matrix_chat/shaping_preamble_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch replaces the preamble on the second turn",
     ),
     (
         "openai/corpus_matrix_responses/shaping_active_tools_none_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch drops every tool on the second turn",
     ),
     (
         "openai/corpus_matrix_responses/shaping_preamble_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch replaces the preamble on the second turn",
     ),
     (
         "gemini/corpus_matrix/shaping_active_tools_none_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch drops every tool on the second turn",
     ),
     (
         "gemini/corpus_matrix/shaping_preamble_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch replaces the preamble on the second turn",
     ),
     (
         "deepseek/corpus_matrix/shaping_active_tools_none_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch drops every tool on the second turn",
     ),
     (
         "deepseek/corpus_matrix/shaping_preamble_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch replaces the preamble on the second turn",
     ),
     (
         "doubleword/corpus_matrix/shaping_active_tools_none_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch drops every tool on the second turn",
     ),
     (
         "doubleword/corpus_matrix/shaping_preamble_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch replaces the preamble on the second turn",
     ),
     (
         "venice/corpus_matrix/shaping_active_tools_none_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch drops every tool on the second turn",
     ),
     (
         "venice/corpus_matrix/shaping_preamble_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch replaces the preamble on the second turn",
     ),
     (
@@ -678,7 +725,7 @@ const IGNORED_RESPONSE: &str = "{}";
 /// likely place for iteration order to leak.
 fn determinism_probe_request() -> CompletionRequest {
     let tool = |name: &str, first: &str, second: &str| ToolDefinition {
-        name: name.to_owned(),
+        name: rig_core::message::ToolName::new(name).expect("tool name"),
         description: format!("Deterministic ordering probe tool {name}."),
         parameters: serde_json::json!({
             "type": "object",
@@ -709,33 +756,28 @@ fn determinism_probe_request() -> CompletionRequest {
         .collect(),
     };
 
-    CompletionRequest {
-        chat_history: vec![
-            Message::system("You are a deterministic serialization probe."),
-            Message::User {
-                content: vec![UserContent::text("probe")],
-            },
-        ],
-        documents: vec![document],
-        tools: vec![
-            tool("alpha_probe", "alpha_first", "alpha_second"),
-            tool("beta_probe", "beta_first", "beta_second"),
-            tool("gamma_probe", "gamma_first", "gamma_second"),
-        ],
-        temperature: Some(0.0),
-        max_tokens: Some(16),
-        tool_choice: None,
-        additional_params: Some(serde_json::json!({
-            "seed": 7,
-            "top_p": 0.5,
-            "frequency_penalty": 0.0,
-            "presence_penalty": 0.0,
-            "user": "cache-determinism-probe",
-        })),
-        model: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    let mut request = CompletionRequest::from(vec![
+        Message::system("You are a deterministic serialization probe."),
+        Message::User {
+            content: vec![UserContent::text("probe")],
+        },
+    ]);
+    request.documents = vec![document];
+    request.tools = vec![
+        tool("alpha_probe", "alpha_first", "alpha_second"),
+        tool("beta_probe", "beta_first", "beta_second"),
+        tool("gamma_probe", "gamma_first", "gamma_second"),
+    ];
+    request.temperature = Some(0.0);
+    request.max_tokens = Some(16);
+    request.additional_params = Some(serde_json::json!({
+        "seed": 7,
+        "top_p": 0.5,
+        "frequency_penalty": 0.0,
+        "presence_penalty": 0.0,
+        "user": "cache-determinism-probe",
+    }));
+    request
 }
 
 /// The single request body a recording transport captured.
@@ -1052,9 +1094,8 @@ const NO_CACHE_SUITE: &[(&str, &str)] = &[
     ),
     (
         "ollama",
-        "Ollama's /api/chat usage payload carries no cached-token field of any kind, and rig's \
-         Ollama provider therefore has no cache mapping to test — there is nothing for a cache \
-         suite to assert",
+        "Ollama's usage payload carries no cached-token field of any kind, so there is no \
+         cache mapping to test and nothing for a cache suite to assert",
     ),
     (
         "voyageai",

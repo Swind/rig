@@ -27,7 +27,7 @@ pub enum ChatError {
     InvalidMessageLimit,
     /// The agent stream failed.
     #[error("{0}")]
-    Stream(#[from] rig_agent::agent::StreamingError),
+    Stream(#[from] rig_agent::completion::PromptError),
     /// The stream ended without a terminal item.
     #[error("agent stream ended without a final response")]
     UnexpectedEnd,

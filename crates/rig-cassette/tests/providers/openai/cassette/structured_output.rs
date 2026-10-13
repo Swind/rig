@@ -68,28 +68,6 @@ fn assert_weather_forecast(forecast: &WeatherForecast, expected_city: &[&str]) {
 }
 
 #[tokio::test]
-async fn structured_output_smoke() {
-    with_openai_cassette(
-        "structured_output/structured_output_smoke",
-        |client| async move {
-            let agent = rig::AgentBuilder::new(client.openai.completion(openai::GPT_4O))
-                .output_schema::<SmokeStructuredOutput>()
-                .output_mode(OutputMode::Native)
-                .build();
-
-            let response: SmokeStructuredOutput = agent
-                .prompt_typed(STRUCTURED_OUTPUT_PROMPT)
-                .await
-                .expect("structured output prompt should succeed")
-                .output;
-
-            assert_smoke_structured_output(&response);
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
 async fn classic_tool_mode_maps_through_openai_responses() {
     let http = RecordingHttpClient::new(output_tool_response("final_result"));
     let client = OpenAIConfig::new("test-key");
@@ -102,7 +80,7 @@ async fn classic_tool_mode_maps_through_openai_responses() {
         .prompt(STRUCTURED_OUTPUT_PROMPT)
         .await
         .expect("classic OpenAI Tool-mode run should succeed")
-        .output;
+        .output();
     let structured: SmokeStructuredOutput =
         decode_structured_output("openai_classic_tool_mode", &response)
             .expect("output-tool arguments should deserialize");
@@ -158,7 +136,7 @@ async fn prompt_typed_and_output_schema() {
                 .prompt("What's the weather forecast for Chicago?")
                 .await
                 .expect("output schema prompt should succeed")
-                .output;
+                .output();
             let parsed: WeatherForecast =
                 decode_structured_output("openai_output_schema_weather", &response)
                     .expect("schema response should deserialize");

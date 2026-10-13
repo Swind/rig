@@ -34,6 +34,7 @@ extern crate self as rig;
 #[cfg(feature = "audio")]
 #[cfg_attr(docsrs, doc(cfg(feature = "audio")))]
 pub mod audio_generation;
+pub mod catalog;
 pub mod client;
 pub mod completion;
 pub mod conversation_search;
@@ -64,6 +65,7 @@ pub mod rerank;
 pub mod serve;
 
 pub mod streaming;
+pub mod structured_output;
 #[cfg(any(test, feature = "test-utils"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-utils")))]
 pub mod test_utils;

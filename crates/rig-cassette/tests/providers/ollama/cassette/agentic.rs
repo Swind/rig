@@ -3,10 +3,10 @@
 //! These mirror the way real consumers drive Ollama (e.g. repo-tagger):
 //! `output_schema_raw` (raw JSON Schema) combined with thinking, tools, and the
 //! multi-turn non-streaming agent loop — a combination the other cassettes only
-//! exercise separately. rig maps `output_schema` to Ollama's `format` field and
-//! sends `tools` on the same request, so this checks that the model's JSON
-//! answer is produced and parsed correctly when `format` + `tools` + `think` are
-//! all set at once (the path where the #1926 reasoning drop bit).
+//! exercise separately. rig maps `output_schema` to `response_format` and sends
+//! `tools` on the same request, so this checks that the model's JSON answer is
+//! produced and parsed correctly when a schema, tools and thinking are all set
+//! at once (the path where the #1926 reasoning drop bit).
 //!
 //! Replays by default; set `RIG_PROVIDER_TEST_MODE=record` to record against a
 //! local Ollama server.
@@ -41,9 +41,9 @@ fn raw_schema(value: serde_json::Value) -> schemars::Schema {
     serde_json::from_value(value).expect("raw JSON schema should parse")
 }
 
-/// `output_schema_raw` + `think: true` (no tools): structured output must still
-/// be produced and parsed when the model also emits a `thinking` trace. The
-/// existing `structured_output` cassette uses `think: false`, so this covers the
+/// `output_schema_raw` with thinking on (no tools): structured output must still
+/// be produced and parsed when the model also emits a reasoning trace. The
+/// existing `structured_output` cassette turns thinking off, so this covers the
 /// thinking interaction repo-tagger relies on.
 #[tokio::test]
 async fn structured_output_raw_with_thinking() {
@@ -59,7 +59,6 @@ async fn structured_output_raw_with_thinking() {
 
         let agent = rig::AgentBuilder::new(client.completion(MODEL))
             .output_schema_raw(schema)
-            .additional_params(json!({ "think": true }))
             .build();
 
         let response = agent
@@ -71,7 +70,7 @@ async fn structured_output_raw_with_thinking() {
             .expect("structured output with thinking should succeed");
 
         let parsed: serde_json::Value =
-            serde_json::from_str(&response.output).expect("response should be schema JSON");
+            serde_json::from_str(&response.output()).expect("response should be schema JSON");
         for key in ["title", "summary"] {
             assert!(
                 parsed
@@ -85,12 +84,13 @@ async fn structured_output_raw_with_thinking() {
     .await;
 }
 
-/// The repo-tagger builder config: `output_schema_raw` + a tool + `think: true`
-/// + the multi-turn non-streaming agent loop. This is the #1928 regression: by
+/// The repo-tagger builder config: `output_schema_raw` + a tool + thinking +
+/// the multi-turn non-streaming agent loop. This is the #1928 regression: by
 /// default rig now uses Tool output mode, so the schema is offered as the
-/// synthetic `final_result` tool (no native `format` constraint), letting the
-/// model call `get_weather` *and* return structured output. Pre-fix (native
-/// `format` on every turn), the model skipped the tool and answered immediately.
+/// synthetic `final_result` tool (no native `response_format` constraint),
+/// letting the model call `get_weather` *and* return structured output.
+/// Pre-fix (a native constraint on every turn), the model skipped the tool and
+/// answered immediately.
 ///
 /// Asserts both: the real tool is invoked, and the final answer parses against
 /// the schema.
@@ -116,7 +116,6 @@ async fn structured_output_with_tools_and_thinking() {
                 )
                 .tool(WeatherTool::new(call_count.clone()))
                 .output_schema_raw(schema)
-                .additional_params(json!({ "think": true }))
                 .default_max_turns(5)
                 .build();
 
@@ -129,7 +128,7 @@ async fn structured_output_with_tools_and_thinking() {
                 .expect("agentic structured output should succeed");
 
             let parsed: serde_json::Value =
-                serde_json::from_str(&response.output).expect("response should be schema JSON");
+                serde_json::from_str(&response.output()).expect("response should be schema JSON");
             for key in ["city", "summary"] {
                 assert!(
                     parsed
@@ -141,7 +140,7 @@ async fn structured_output_with_tools_and_thinking() {
             }
 
             // #1928: under Tool output mode the model is free to use its tools,
-            // so the real tool is actually invoked (not suppressed by `format`).
+            // so the real tool is actually invoked (not suppressed by `response_format`).
             assert!(
                 call_count.load(Ordering::SeqCst) >= 1,
                 "[ollama] get_weather should be invoked under Tool output mode (#1928)"
@@ -179,7 +178,7 @@ async fn streaming_structured_output_with_tools() {
                 )
                 .tool(WeatherTool::new(call_count.clone()))
                 .output_schema_raw(schema)
-                .additional_params(json!({ "think": false }))
+                .reasoning(rig::completion::Reasoning::Off)
                 .default_max_turns(5)
                 .build();
 
@@ -217,7 +216,7 @@ async fn streaming_structured_output_with_tools() {
 }
 
 /// Explicit `OutputMode::Native` is the opt-out / escape hatch: the schema is
-/// sent as the provider's native `format` constraint (the pre-#1928 behavior),
+/// sent as the provider's native `response_format` constraint (the pre-#1928 behavior),
 /// which still produces valid structured output. Callers who know their model
 /// handles tools + native structured output together can select it.
 #[tokio::test]
@@ -235,7 +234,7 @@ async fn native_mode_emits_structured_output() {
             .tool(WeatherTool::new(call_count.clone()))
             .output_schema_raw(schema)
             .output_mode(OutputMode::Native)
-            .additional_params(json!({ "think": false }))
+            .reasoning(rig::completion::Reasoning::Off)
             .default_max_turns(3)
             .build();
 
@@ -245,7 +244,7 @@ async fn native_mode_emits_structured_output() {
             .expect("native structured output should succeed");
 
         let parsed: serde_json::Value =
-            serde_json::from_str(&response.output).expect("response should be schema JSON");
+            serde_json::from_str(&response.output()).expect("response should be schema JSON");
         for key in ["city", "summary"] {
             assert!(
                 parsed
@@ -253,43 +252,6 @@ async fn native_mode_emits_structured_output() {
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|s| !s.trim().is_empty()),
                 "[ollama] native structured output missing non-empty `{key}`: {parsed}"
-            );
-        }
-    })
-    .await;
-}
-
-/// `OutputMode::Prompted` injects the schema into the system prompt and parses
-/// the model's final text — no native `format`, no output tool. Useful for
-/// models lacking reliable tool calling or native structured output.
-#[tokio::test]
-async fn prompted_mode_returns_parseable_json() {
-    with_ollama_cassette("agentic/prompted_mode", |client| async move {
-        let schema = raw_schema(json!({
-            "type": "object",
-            "properties": { "title": { "type": "string" }, "summary": { "type": "string" } },
-            "required": ["title", "summary"]
-        }));
-
-        let agent = rig::AgentBuilder::new(client.completion(MODEL))
-            .output_schema_raw(schema)
-            .output_mode(OutputMode::Prompted)
-            .additional_params(json!({ "think": false }))
-            .build();
-
-        let response = agent
-            .prompt("Summarize the Rust programming language with a short title and a one-sentence summary.")
-            .await
-            .expect("prompted structured output should succeed");
-
-        let parsed: serde_json::Value = first_json_object(&response.output);
-        for key in ["title", "summary"] {
-            assert!(
-                parsed
-                    .get(key)
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|s| !s.trim().is_empty()),
-                "[ollama] prompted structured output missing non-empty `{key}`: {parsed}"
             );
         }
     })

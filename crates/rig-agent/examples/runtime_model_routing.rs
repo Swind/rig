@@ -23,10 +23,7 @@ use rig_core::test_utils::{MockFrame, MockScript};
 use serde::Deserialize;
 
 fn usage(total_tokens: u64) -> Usage {
-    Usage {
-        total_tokens: Some(total_tokens),
-        ..Usage::default()
-    }
+    Usage::new().total_tokens(total_tokens)
 }
 
 /// A local model: `answer` decides its reply from the request. It is the
@@ -45,16 +42,12 @@ impl Transport<MockScript> for Scripted {
             Ok(answer) => answer,
             Err(error) => return Opening::failed(error),
         };
-        let response = {
-            let mut response = CompletionResponse::new(
-                vec![answer],
-                usage(self.total_tokens),
-                self.provider,
-                serde_json::Value::Null,
-            );
-            response.message_id = Some(format!("{}-message", self.provider));
-            response
-        };
+        let response = CompletionResponse::new(
+            vec![answer],
+            usage(self.total_tokens),
+            rig_core::message::Origin::new("example.api", self.provider, ""),
+            serde_json::Value::Null,
+        );
         Opening::ready(Opened::new(stream::iter([Ok(MockFrame::Response(
             Box::new(response),
         ))])))

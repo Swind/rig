@@ -1,15 +1,7 @@
 use rig_test_support::cassette_models::CopilotModels;
 mod agent;
 mod auth;
-#[path = "cassette/ecs_completion.rs"]
-mod ecs_completion;
-#[path = "cassette/ecs_extractor.rs"]
-mod ecs_extractor;
-#[path = "cassette/ecs_extractor_usage.rs"]
-mod ecs_extractor_usage;
 mod embeddings;
-mod extractor;
-mod extractor_usage;
 mod models;
 mod multi_extract;
 mod noninteractive_oauth_cassette;
@@ -19,7 +11,6 @@ mod raw_completion_parity_matrix;
 mod raw_stream_capture_matrix;
 mod reasoning_roundtrip;
 mod reasoning_tool_roundtrip;
-mod request_hook;
 mod routing;
 mod streaming;
 mod streaming_tools;
@@ -136,7 +127,7 @@ pub(crate) async fn live_client() -> CopilotModels {
         authorize(live_source(), None, true)
             .await
             .expect("Copilot credential should resolve"),
-        rig::rig_reqwest::shared(),
+        rig_test_support::cassettes::local_http(),
     )
 }
 
@@ -193,7 +184,7 @@ where
     let (cassette, client) = copilot_cassette(spec).await;
     let result = AssertUnwindSafe(test_body(CopilotModels::new(
         client,
-        rig::rig_reqwest::shared(),
+        rig_test_support::cassettes::local_http(),
     )))
     .catch_unwind()
     .await;
@@ -211,7 +202,7 @@ where
     let (cassette, client) = copilot_cassette(spec).await;
     let result = AssertUnwindSafe(test_body(CopilotModels::new(
         client,
-        rig::rig_reqwest::shared(),
+        rig_test_support::cassettes::local_http(),
     )))
     .catch_unwind()
     .await;
@@ -228,7 +219,7 @@ pub(crate) async fn with_copilot_noninteractive_oauth_cassette<F, Fut>(
     let (cassette, client, _temp) = copilot_noninteractive_oauth_cassette(spec).await;
     let result = AssertUnwindSafe(test_body(CopilotModels::new(
         client,
-        rig::rig_reqwest::shared(),
+        rig_test_support::cassettes::local_http(),
     )))
     .catch_unwind()
     .await;

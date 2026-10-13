@@ -1,9 +1,6 @@
 use super::*;
 use crate::http_client::{HeaderMap, StatusCode};
 use crate::providers::openai::OpenAIConfig;
-use crate::providers::openai::responses_api::{
-    IncompleteDetailsReason, ResponseError, ResponseObject, ResponsesUsage,
-};
 use crate::ws_client::CloseFrame;
 use serde_json::json;
 
@@ -43,71 +40,6 @@ fn rejection(
     )
 }
 
-/// The live shape, recorded in
-/// `websocket_error_identity_matrix/handshake_rejection_carries_status_body_and_request_id`.
-const REJECTION_BODY: &str = r#"{"error":{"message":"Incorrect API key provided: sk-inval***-key.","type":"invalid_request_error","code":"invalid_api_key","param":null},"status":401}"#;
-
-#[test]
-fn websocket_provider_error_preserves_status_body_and_request_id() {
-    let error = websocket_provider_error(rejection(
-        401,
-        Some("req_websocket_1"),
-        Some(REJECTION_BODY),
-        &[],
-    ));
-
-    assert!(matches!(error, ProviderError::ProviderResponse(_)));
-    assert_eq!(
-        error.provider_response_status(),
-        Some(StatusCode::UNAUTHORIZED)
-    );
-    assert_eq!(error.provider_response_body(), Some(REJECTION_BODY));
-    assert_eq!(error.provider_request_id(), Some("req_websocket_1"));
-    assert_eq!(
-        error
-            .provider_response_json()
-            .expect("body should be valid JSON")
-            .expect("parsed JSON should be present")["error"]["code"],
-        "invalid_api_key"
-    );
-}
-
-/// The id is optional everywhere else in this crate and is optional here:
-/// its absence must not cost the status or the body.
-#[test]
-fn websocket_provider_error_without_a_request_id_keeps_the_rest() {
-    let error = websocket_provider_error(rejection(401, None, Some(REJECTION_BODY), &[]));
-
-    assert_eq!(
-        error.provider_response_status(),
-        Some(StatusCode::UNAUTHORIZED)
-    );
-    assert_eq!(error.provider_response_body(), Some(REJECTION_BODY));
-    assert_eq!(error.provider_request_id(), None);
-}
-
-#[test]
-fn websocket_provider_error_treats_an_empty_request_id_as_absent() {
-    let error = websocket_provider_error(rejection(401, Some(""), Some(REJECTION_BODY), &[]));
-
-    assert_eq!(error.provider_request_id(), None);
-    assert_eq!(error.provider_response_body(), Some(REJECTION_BODY));
-}
-
-#[test]
-fn websocket_provider_error_without_a_body_keeps_the_status() {
-    let error = websocket_provider_error(rejection(503, Some("req_websocket_2"), None, &[]));
-
-    assert_eq!(
-        error.provider_response_status(),
-        Some(StatusCode::SERVICE_UNAVAILABLE)
-    );
-    assert_eq!(error.provider_request_id(), Some("req_websocket_2"));
-    // An empty preserved body is `Some("")`, not `None`: the provider
-    // answered, it just said nothing.
-    assert_eq!(error.provider_response_body(), Some(""));
-}
-
 /// Every status a refused upgrade can carry, **including 2xx and 3xx**:
 /// tungstenite raises `Error::Http` for any non-101 response, and
 /// `connect_async` does not follow redirects, so a `200` or a `302` reaches
@@ -123,64 +55,6 @@ fn websocket_provider_error_preserves_every_rejection_status() {
             "status {status} should survive"
         );
     }
-}
-
-/// A `429` upgrade carries the same rate-limit metadata its HTTP twin
-/// does, and a caller that has to back off needs it (rig#2210).
-#[test]
-fn websocket_provider_error_preserves_the_rejections_headers() {
-    let error = websocket_provider_error(rejection(
-        429,
-        Some("req_websocket_3"),
-        Some("{}"),
-        &[("retry-after", "20"), ("x-ratelimit-remaining", "0")],
-    ));
-
-    let headers = error
-        .provider_response_headers()
-        .expect("headers should be preserved");
-    assert_eq!(
-        headers.get("retry-after").and_then(|v| v.to_str().ok()),
-        Some("20")
-    );
-    assert_eq!(
-        headers
-            .get("x-ratelimit-remaining")
-            .and_then(|v| v.to_str().ok()),
-        Some("0")
-    );
-    // The id is read before the map is consumed.
-    assert_eq!(error.provider_request_id(), Some("req_websocket_3"));
-}
-
-/// A failure that never reached the provider has no response to preserve
-/// and stays a transport error, with the transport table's retryability.
-#[test]
-fn websocket_provider_error_leaves_a_transport_failure_alone() {
-    let error = websocket_provider_error(http_client::Error::StreamEnded);
-
-    assert!(matches!(error, ProviderError::Http(_)));
-    assert!(error.is_retryable());
-    assert_eq!(error.provider_response_status(), None);
-    assert_eq!(error.provider_response_body(), None);
-    assert_eq!(error.provider_request_id(), None);
-}
-
-/// The regression this mapping exists for: a rejection must not flatten to
-/// its display string (rig#2314, rig#2315).
-#[test]
-fn websocket_provider_error_no_longer_flattens_a_rejection_to_a_string() {
-    let error = websocket_provider_error(rejection(
-        401,
-        Some("req_websocket_4"),
-        Some(REJECTION_BODY),
-        &[],
-    ));
-
-    assert!(
-        error.provider_response_body().is_some(),
-        "the provider's own body must survive, not just a display string"
-    );
 }
 
 #[test]
@@ -213,35 +87,22 @@ fn websocket_error_event_preserves_provider_payload_as_json() {
     assert_eq!(json["error"]["type"], "invalid_request_error");
 }
 
-fn sample_response(status: ResponseStatus) -> CompletionResponse {
-    CompletionResponse {
-        id: "resp_123".to_string(),
-        object: ResponseObject::Response,
-        created_at: 0,
-        status,
-        error: None,
-        incomplete_details: None,
-        instructions: None,
-        max_output_tokens: None,
-        model: "gpt-5.4".to_string(),
-        usage: Some(ResponsesUsage {
-            input_tokens: 1,
-            input_tokens_details: None,
-            output_tokens: 2,
-            output_tokens_details: Some(
-                crate::providers::openai::responses_api::OutputTokensDetails {
-                    reasoning_tokens: 0,
-                },
-            ),
-            total_tokens: 3,
-        }),
-        output: Vec::new(),
-        tools: Vec::new(),
-        additional_parameters: Default::default(),
-        provider_reasoning: None,
-        reasoning_metadata: None,
-        reasoning_context: None,
-    }
+fn sample_response(status: &str) -> Value {
+    json!({
+        "id": "resp_123",
+        "object": "response",
+        "created_at": 0,
+        "status": status,
+        "model": "gpt-5.4",
+        "usage": {
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "output_tokens_details": { "reasoning_tokens": 0 },
+            "total_tokens": 3
+        },
+        "output": [],
+        "tools": []
+    })
 }
 
 #[test]
@@ -250,23 +111,6 @@ fn warmup_options_serialize_generate_false() {
     let json = serde_json::to_value(options).expect("options should serialize");
 
     assert_eq!(json, json!({ "generate": false }));
-}
-
-/// The handshake request carries the endpoint path and the wire's own auth
-/// headers, on the websocket scheme.
-#[test]
-fn websocket_request_targets_the_responses_endpoint_with_the_wires_headers() {
-    let request =
-        websocket_request(&test_wire("https://api.openai.com/v1")).expect("request should build");
-
-    assert_eq!(request.uri(), "wss://api.openai.com/v1/responses");
-    assert_eq!(
-        request
-            .headers()
-            .get(http::header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok()),
-        Some("Bearer test-key")
-    );
 }
 
 #[test]
@@ -305,168 +149,37 @@ fn parse_done_event_exposes_response_id() {
     assert!(event.is_terminal());
 }
 
+/// A terminal event that states no response object still ends the turn:
+/// nothing in it is needed to build a block (#2668).
 #[test]
-fn parse_response_completed_event_is_terminal() {
-    let payload = json!({
-        "type": "response.completed",
-        "sequence_number": 12,
-        "response": {
-            "id": "resp_completed_1",
-            "object": "response",
-            "created_at": 0,
-            "status": "completed",
-            "error": null,
-            "incomplete_details": null,
-            "instructions": null,
-            "max_output_tokens": null,
-            "model": "gpt-5.4",
-            "usage": null,
-            "output": [],
-            "tools": []
-        }
-    });
-
-    let event = parse_server_event(&payload.to_string())
-        .expect("response event should deserialize")
-        .expect("response event should not be skipped");
-
-    assert!(matches!(event, ResponsesWebSocketEvent::Response(_)));
-    assert!(event.is_terminal());
-    assert_eq!(event.response_id(), Some("resp_completed_1"));
-}
-
-#[test]
-fn parse_live_output_item_added_event() {
-    let payload = json!({
-        "type": "response.output_item.added",
-        "item": {
-            "id": "msg_036471c3a72c147b0069ae7848d68881959773fd2d99e3d98a",
-            "type": "message",
-            "status": "in_progress",
-            "content": [],
-            "role": "assistant"
-        },
-        "output_index": 0,
-        "sequence_number": 2
-    });
-
-    let event = parse_server_event(&payload.to_string())
-        .expect("output item event should parse")
-        .expect("output item event should not be skipped");
-
-    assert!(matches!(event, ResponsesWebSocketEvent::Item(_)));
-}
-
-#[test]
-fn parse_live_content_part_added_event() {
-    let payload = json!({
-        "type": "response.content_part.added",
-        "content_index": 0,
-        "item_id": "msg_036471c3a72c147b0069ae7848d68881959773fd2d99e3d98a",
-        "output_index": 0,
-        "part": {
-            "type": "output_text",
-            "annotations": [],
-            "logprobs": [],
-            "text": ""
-        },
-        "sequence_number": 3
-    });
-
-    let event = parse_server_event(&payload.to_string())
-        .expect("content part event should parse")
-        .expect("content part event should not be skipped");
-
-    assert!(matches!(event, ResponsesWebSocketEvent::Item(_)));
-}
-
-#[test]
-fn parse_live_output_text_delta_event() {
-    let payload = json!({
-        "type": "response.output_text.delta",
-        "content_index": 0,
-        "delta": "Web",
-        "item_id": "msg_023af0f0a91bc2a90069ae788612e881958345bb156915ba29",
-        "logprobs": [],
-        "obfuscation": "2YYErYq7jkqqM",
-        "output_index": 0,
-        "sequence_number": 4
-    });
-
-    let event = parse_server_event(&payload.to_string())
-        .expect("output text delta event should parse")
-        .expect("output text delta event should not be skipped");
-
-    assert!(matches!(event, ResponsesWebSocketEvent::Item(_)));
-}
-
-#[test]
-fn parse_reasoning_text_delta_event_is_item() {
-    let payload = json!({
-        "type": "response.reasoning_text.delta",
-        "item_id": "rs_1",
-        "output_index": 0,
-        "content_index": 0,
-        "sequence_number": 1,
-        "delta": "thinking",
-    });
-
-    let event = parse_server_event(&payload.to_string())
-        .expect("reasoning delta should parse")
-        .expect("reasoning delta should not be skipped");
-
-    assert!(matches!(event, ResponsesWebSocketEvent::Item(_)));
-    assert!(!event.is_terminal());
-}
-
-#[test]
-fn unknown_event_type_is_forwarded_raw() {
-    let payload = json!({
-        "type": "response.some_future_event",
-        "data": "hello"
-    });
-
-    let result = parse_server_event(&payload.to_string()).expect("unknown event should not error");
-    // Semantically skipped, but carried verbatim so the streaming surface
-    // can yield it on the `StreamEvent::Unknown` passthrough.
-    match result {
-        Some(ResponsesWebSocketEvent::Unknown(value)) => assert_eq!(value, payload.into()),
-        other => panic!("expected the raw Unknown passthrough event, got {other:?}"),
-    }
-}
-
-#[test]
-fn malformed_known_event_returns_error() {
+fn a_terminal_without_its_response_object_still_ends_the_turn() {
     let payload = json!({
         "type": "response.completed"
     });
 
-    let error =
-        parse_server_event(&payload.to_string()).expect_err("malformed known event should error");
-    assert!(
-        error.to_string().contains("StreamingCompletionChunk"),
-        "expected strict decode failure, got {error}"
-    );
+    let event = parse_server_event(&payload.to_string())
+        .expect("a sparse known event classifies")
+        .expect("it is not skipped");
+    assert!(event.is_terminal());
+    assert_eq!(event.response_id(), None);
 }
 
 #[test]
 fn terminal_response_requires_completed_status() {
-    let completed = terminal_response_result(sample_response(ResponseStatus::Completed))
+    let completed = terminal_response_result(sample_response("completed"))
         .expect("completed response should succeed");
-    assert_eq!(completed.id, "resp_123");
+    assert_eq!(completed["id"], "resp_123");
 
-    let failed = terminal_response_result(sample_response(ResponseStatus::Failed))
+    let failed = terminal_response_result(sample_response("failed"))
         .expect_err("failed response should error");
     assert!(failed.to_string().contains("failed response"));
 }
 
 #[test]
 fn terminal_failed_response_with_error_preserves_raw_payload() {
-    let mut response = sample_response(ResponseStatus::Failed);
-    response.error = Some(ResponseError {
-        code: "server_error".to_string(),
-        message: "the model failed to generate a response".to_string(),
-    });
+    let mut response = sample_response("failed");
+    response["error"] =
+        json!({ "code": "server_error", "message": "the model failed to generate a response" });
 
     let Err(err) = terminal_response_result(response) else {
         panic!("failed response with an error object should fail")
@@ -491,7 +204,7 @@ fn terminal_failed_response_with_error_preserves_raw_payload() {
 
 #[test]
 fn terminal_failed_response_without_error_is_rig_diagnostic() {
-    let Err(err) = terminal_response_result(sample_response(ResponseStatus::Failed)) else {
+    let Err(err) = terminal_response_result(sample_response("failed")) else {
         panic!("failed response should fail")
     };
 
@@ -499,19 +212,6 @@ fn terminal_failed_response_without_error_is_rig_diagnostic() {
     // no preserved provider response body.
     assert_eq!(err.provider_response_body(), None);
     assert!(err.to_string().contains("failed response"));
-}
-
-/// An incomplete terminal is a success, not a failure: the partial output
-/// and usage are kept and normalization maps the status downstream.
-#[test]
-fn terminal_incomplete_response_is_a_terminal_success() {
-    let mut response = sample_response(ResponseStatus::Incomplete);
-    response.incomplete_details = Some(IncompleteDetailsReason {
-        reason: "max_output_tokens".to_string(),
-    });
-
-    let response = terminal_response_result(response).expect("incomplete is a terminal");
-    assert!(matches!(response.status, ResponseStatus::Incomplete));
 }
 
 /// A close frame mid-turn is an error naming the peer's reason; a keepalive
@@ -540,4 +240,72 @@ fn websocket_frame_to_text_maps_control_frames() {
     let error = websocket_frame_to_text(Frame::Close(None))
         .expect_err("a reasonless close still ends the turn");
     assert!(error.to_string().contains("without a close reason"));
+}
+
+/// A turn's `raw` is the `Response` its events rebuild, as a stream's is: a
+/// terminal that states no output takes the items the turn finished.
+#[test]
+fn a_turn_records_the_response_its_events_rebuild() {
+    let wire = test_wire("wss://api.openai.com/v1");
+    let reply = std::sync::Mutex::new(Shared::new(Turn::relayed("openai")));
+    let mut decoder = wire.decoder();
+    let mut document = wire.reassembler();
+    let item = json!({
+        "type": "message",
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "pong", "annotations": []}]
+    });
+    let events = [
+        json!({"type": "response.created", "response": sample_response("in_progress")}),
+        json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []}}),
+        json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "item_id": "msg_1", "delta": "pong"}),
+        json!({"type": "response.output_item.done", "output_index": 0, "item": item}),
+        json!({"type": "response.completed", "response": sample_response("completed")}),
+    ];
+    let mut ended = false;
+    for event in events {
+        ended = feed(&mut decoder, &mut document, &reply, event.to_string())
+            .expect("the turn's events decode");
+    }
+    assert!(ended, "the terminal event ends the turn");
+
+    let response = fold_reply(reply, ended, "openai", document).expect("the turn folds");
+    let mut expected = sample_response("completed");
+    expected["output"] = json!([item]);
+    assert_eq!(response.raw, expected);
+}
+
+/// A websocket error event and a `response.failed` lifecycle event are
+/// classified by their code, like the same envelope on the SSE stream.
+#[test]
+fn websocket_failures_with_a_transient_code_are_retryable() {
+    let payload = json!({ "type": "error", "error": { "code": "server_error" } });
+    let Ok(Some(ResponsesWebSocketEvent::Error(error))) = parse_server_event(&payload.to_string())
+    else {
+        panic!("an error event parses as one")
+    };
+    let err = provider_error_from_event(&error);
+    assert!(err.is_retryable(), "{err}");
+    assert_eq!(err.report().code.as_deref(), Some("server_error"));
+
+    let payload = json!({
+        "type": "response.failed",
+        "response": {
+            "status": "failed",
+            "error": { "code": "rate_limit_exceeded", "message": "slow down" }
+        }
+    });
+    let Ok(Some(ResponsesWebSocketEvent::Response { kind, response })) =
+        parse_server_event(&payload.to_string())
+    else {
+        panic!("a lifecycle event parses as one")
+    };
+    assert_eq!(kind, "response.failed");
+    let Err(err) = terminal_response_result(response) else {
+        panic!("a failed response fails")
+    };
+    assert!(err.is_retryable(), "{err}");
+    assert_eq!(err.report().code.as_deref(), Some("rate_limit_exceeded"));
 }

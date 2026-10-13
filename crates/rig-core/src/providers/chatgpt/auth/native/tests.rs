@@ -1,37 +1,25 @@
 use super::{
-    DeviceCodeHandler, DeviceCodeResponse, OAuthErrorResponse, OAuthTokenResponse,
-    PlatformAuthenticator, build_auth_record, format_refresh_error,
-    should_reauthenticate_after_refresh,
+    DeviceCodeResponse, OAuthErrorResponse, OAuthTokenResponse, build_auth_record,
+    format_refresh_error, should_reauthenticate_after_refresh,
 };
+use crate::providers::chatgpt::auth::{AuthSource, Authenticator, DeviceCodeHandler};
 use crate::test_utils::RecordingHttpClient;
 use http::StatusCode;
 
 #[test]
-fn device_code_response_accepts_numeric_interval() {
-    let response: DeviceCodeResponse = serde_json::from_str(
-        r#"{
+fn device_code_response_accepts_a_numeric_or_string_interval() {
+    for (case, interval) in [("numeric", "5"), ("string", r#""5""#)] {
+        let response: DeviceCodeResponse = serde_json::from_str(&format!(
+            r#"{{
                 "device_auth_id": "deviceauth_123",
                 "user_code": "ABCD-EFGH",
-                "interval": 5
-            }"#,
-    )
-    .expect("device code response");
+                "interval": {interval}
+            }}"#
+        ))
+        .unwrap_or_else(|error| panic!("{case}: device code response: {error}"));
 
-    assert_eq!(response.interval, Some(5));
-}
-
-#[test]
-fn device_code_response_accepts_string_interval() {
-    let response: DeviceCodeResponse = serde_json::from_str(
-        r#"{
-                "device_auth_id": "deviceauth_123",
-                "user_code": "ABCD-EFGH",
-                "interval": "5"
-            }"#,
-    )
-    .expect("device code response");
-
-    assert_eq!(response.interval, Some(5));
+        assert_eq!(response.interval, Some(5), "{case}");
+    }
 }
 
 #[test]
@@ -60,9 +48,9 @@ fn refresh_reauth_only_on_invalid_grant() {
 
 #[tokio::test]
 async fn noninteractive_oauth_requires_sign_in_instead_of_device_flow() {
-    let auth = PlatformAuthenticator::new(None, DeviceCodeHandler::default(), false);
+    let auth = Authenticator::new(AuthSource::OAuth, None, DeviceCodeHandler::default(), false);
     let err = auth
-        .auth_context_oauth(&RecordingHttpClient::new(""))
+        .auth_context(&RecordingHttpClient::new(""))
         .await
         .expect_err("missing cached auth should not start device flow")
         .to_string();
@@ -115,8 +103,13 @@ async fn cached_credential_remains_persistent_and_reusable() -> anyhow::Result<(
     let record: super::AuthRecord = serde_json::from_value(fixture.clone())?;
     super::write_json_record(Some(&path), &record)?;
     let http = RecordingHttpClient::new("");
-    let auth = PlatformAuthenticator::new(Some(path.clone()), DeviceCodeHandler::default(), false);
-    let context = auth.auth_context_oauth(&http).await?;
+    let auth = Authenticator::new(
+        AuthSource::OAuth,
+        Some(path.clone()),
+        DeviceCodeHandler::default(),
+        false,
+    );
+    let context = auth.auth_context(&http).await?;
     anyhow::ensure!(http.requests().is_empty(), "a fresh cache must not refresh");
     anyhow::ensure!(
         context.access_token.expose() == "synthetic-cached-chatgpt-token",

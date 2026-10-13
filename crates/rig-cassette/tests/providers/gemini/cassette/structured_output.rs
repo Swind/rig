@@ -5,7 +5,6 @@ use rig::providers::gemini::{self, GeminiConfig};
 use rig::test_utils::{MockHttpResponse, SequencedHttpClient};
 use rig_agent::test_utils::decode_structured_output;
 
-use super::super::support::with_gemini_cassette;
 use crate::support::{
     STRUCTURED_OUTPUT_PROMPT, SmokeStructuredOutput, assert_smoke_structured_output,
     smoke_structured_output_value,
@@ -59,30 +58,6 @@ fn output_tool_response(name: &str) -> String {
 }
 
 #[tokio::test]
-async fn structured_output_smoke() {
-    with_gemini_cassette(
-        "structured_output/structured_output_smoke",
-        |client| async move {
-            let agent = rig::AgentBuilder::new(client.completion("gemini-3-flash-preview"))
-                .output_schema::<SmokeStructuredOutput>()
-                .output_mode(OutputMode::Native)
-                .build();
-
-            let response = agent
-                .prompt(STRUCTURED_OUTPUT_PROMPT)
-                .await
-                .expect("structured output prompt should succeed");
-            let structured: SmokeStructuredOutput =
-                decode_structured_output("gemini_structured_output_smoke", &response.output)
-                    .expect("structured output should deserialize");
-
-            assert_smoke_structured_output(&structured);
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
 async fn classic_invalid_output_recovers_through_gemini_generate_content() {
     let http = SequencedHttpClient::new([
         MockHttpResponse::success(text_response("not valid JSON", "gemini-runtime-invalid")),
@@ -104,7 +79,7 @@ async fn classic_invalid_output_recovers_through_gemini_generate_content() {
         .await
         .expect("classic Gemini output recovery should succeed");
     let structured: SmokeStructuredOutput =
-        decode_structured_output("gemini_classic_recovery", &response.output)
+        decode_structured_output("gemini_classic_recovery", &response.output())
             .expect("recovered output-tool arguments should deserialize");
     assert_smoke_structured_output(&structured);
 

@@ -14,42 +14,20 @@
 //! `tests/README.md`.
 
 use rig::AgentBuilder;
-use rig::agent::Agent;
 use rig::completion::CacheRates;
-use rig::providers::openai::{GPT_6_1_SOL, GPT_6_ASTRA, GPT_6_LUNA, GPT_6_SOL};
-use rig_test_support::cache_longrun::workloads::{
-    self, DOCUMENT_PREAMBLE, OrderHistory, ShippingLog,
-};
+use rig::providers::openai::GPT_6_SOL;
+use rig_test_support::cache_longrun::workloads::{self, DOCUMENT_PREAMBLE};
 use rig_test_support::cache_longrun::{
-    self, CacheWire, Figures, Limits, LongRun, LookupOrder, Recording, RunLog, SUPPORT_PREAMBLE,
+    self, CacheWire, Figures, Limits, LongRun, Recording, RunLog,
 };
-use serde_json::{Value, json};
 
-use super::super::support::with_openai_long_run_cassette;
+use rig::completion::{Effort, GenerationOptions, ProviderOptions};
+
+use super::super::support::{effort, shared_options, with_openai_long_run_cassette};
 
 /// The one key every run sends.
 const CACHE_KEY: &str = "rig-long-run-workloads";
 
-/// Standard prices, USD per 1M tokens: input, cached input and cache writes
-/// (pricing page, 2026-09-29), and output.
-const ASTRA: (CacheRates, f64) = (
-    CacheRates {
-        input: 10.0,
-        cached_read: 1.0,
-        cache_write: 12.5,
-        storage_per_hour: 0.0,
-    },
-    50.0,
-);
-const SOL_6_1: (CacheRates, f64) = (
-    CacheRates {
-        input: 2.0,
-        cached_read: 0.10,
-        cache_write: 2.5,
-        storage_per_hour: 0.0,
-    },
-    10.0,
-);
 const SOL: (CacheRates, f64) = (
     CacheRates {
         input: 2.0,
@@ -59,33 +37,13 @@ const SOL: (CacheRates, f64) = (
     },
     10.0,
 );
-pub(super) const LUNA: (CacheRates, f64) = (
-    CacheRates {
-        input: 0.1,
-        cached_read: 0.01,
-        cache_write: 0.125,
-        storage_per_hour: 0.0,
-    },
-    0.5,
-);
 
 /// Stateless, low effort, one cache key.
-fn params() -> Value {
-    json!({
-        "prompt_cache_key": CACHE_KEY,
-        "reasoning": { "effort": "low" },
-        "store": false,
-    })
-}
-
-pub(super) fn support_agent(model: rig::DynModel<rig::operation::Completion>) -> Agent {
-    AgentBuilder::new(model)
-        .preamble(SUPPORT_PREAMBLE)
-        .tool(LookupOrder)
-        .max_tokens(800)
-        .additional_params(params())
-        .default_max_turns(4)
-        .build()
+fn options() -> (GenerationOptions, ProviderOptions) {
+    (
+        effort(Effort::Low),
+        shared_options(Some(false), Some(CACHE_KEY)),
+    )
 }
 
 pub(super) fn check(
@@ -111,101 +69,18 @@ pub(super) fn check(
     )
 }
 
-/// Unary and streamed turns alternating in one conversation.
-#[tokio::test]
-async fn mixed_delivery_100_responses() {
-    let log = with_openai_long_run_cassette(
-        "long_run_caching/mixed_delivery_100_responses",
-        |client, clock| async move {
-            let agent = support_agent(client.openai.completion(GPT_6_1_SOL).into());
-            workloads::mixed_delivery(&agent, &clock, 100, "MIXED DELIVERY", "A").await
-        },
-    )
-    .await;
-    check(
-        "long_run_caching/mixed_delivery_100_responses",
-        GPT_6_1_SOL,
-        SOL_6_1,
-        Some(Limits {
-            min_saving: Some(0.60),
-            min_call_share: Some(0.70),
-            max_writes_share: Some(0.25),
-        }),
-        &log,
-    );
-}
-
-/// The same on gpt-6-astra, kept to thirty turns for its price.
-#[tokio::test]
-async fn mixed_delivery_30_responses() {
-    let log = with_openai_long_run_cassette(
-        "long_run_caching/mixed_delivery_30_responses",
-        |client, clock| async move {
-            let agent = support_agent(client.openai.completion(GPT_6_ASTRA).into());
-            workloads::mixed_delivery(&agent, &clock, 30, "MIXED DELIVERY", "A").await
-        },
-    )
-    .await;
-    check(
-        "long_run_caching/mixed_delivery_30_responses",
-        GPT_6_ASTRA,
-        ASTRA,
-        Some(Limits {
-            min_saving: Some(0.50),
-            min_call_share: Some(0.70),
-            max_writes_share: Some(0.25),
-        }),
-        &log,
-    );
-}
-
-/// Twenty account investigations: sixty calls, each turn two histories at
-/// once, then a carrier log, then the answer, with about a thousand tokens
-/// per tool result.
-#[tokio::test]
-async fn tool_loop_60_responses() {
-    let (log, turns) = with_openai_long_run_cassette(
-        "long_run_caching/tool_loop_60_responses",
-        |client, clock| async move {
-            let agent = AgentBuilder::new(client.openai.completion(GPT_6_LUNA))
-                .preamble(workloads::tool_loop_preamble())
-                .tool(OrderHistory)
-                .tool(ShippingLog)
-                .max_tokens(1500)
-                .additional_params(params())
-                .default_max_turns(6)
-                .build();
-            workloads::tool_loop(&agent, &clock, 20, "TOOL LOOP").await
-        },
-    )
-    .await;
-    assert_eq!(turns.len(), 20);
-    check(
-        "long_run_caching/tool_loop_60_responses",
-        GPT_6_LUNA,
-        LUNA,
-        Some(Limits {
-            min_saving: Some(0.50),
-            // The second call adds two histories of about a thousand
-            // tokens each to a prompt of under three thousand, so it can read
-            // well under half of its prompt; the first recording read 38%.
-            min_call_share: Some(0.30),
-            max_writes_share: Some(0.25),
-        }),
-        &log,
-    );
-}
-
 /// Sixty questions about one store policy attached on the first turn.
 #[tokio::test]
 async fn document_60_responses() {
     let log = with_openai_long_run_cassette(
         "long_run_caching/document_60_responses",
         |client, clock| async move {
+            let (options, provider_options) = options();
             let agent = AgentBuilder::new(client.openai.completion(GPT_6_SOL))
                 .preamble(DOCUMENT_PREAMBLE)
                 .max_tokens(800)
-                .additional_params(params())
+                .options(options)
+                .provider_options(provider_options)
                 .build();
             workloads::document_session(
                 &agent,

@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 17759422913336850263,
+    "run_spec": 11199885832449262870,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -66,7 +66,14 @@
           "choice": [
             {
               "type": "text",
-              "text": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"A local gathering for Rust programming language enthusiasts in Seattle to share projects, discuss best practices, and network with fellow developers.\"}"
+              "text": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"A local gathering for Rust programming language enthusiasts in Seattle to share projects, discuss best practices, and network with fellow developers.\"}",
+              "native": {
+                "item": {
+                  "text": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"A local gathering for Rust programming language enthusiasts in Seattle to share projects, discuss best practices, and network with fellow developers.\"}",
+                  "type": "text"
+                },
+                "fingerprint": "c6b40431a82f9d2f"
+              }
             }
           ],
           "usage": {
@@ -74,28 +81,51 @@
             "output_tokens": 46,
             "total_tokens": 156,
             "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
+            "cache_creation_input_tokens": 0,
+            "cost": {
+              "input": 0.00033,
+              "output": 0.00069,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.00102
+            }
           },
-          "message_id": "msg_011CfLccJXwwVViewZoCv3tS",
-          "response_id": null,
+          "origin": {
+            "api": "anthropic.messages",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "response_model": "claude-sonnet-4-6",
+            "response_id": "msg_011CfLccJXwwVViewZoCv3tS"
+          },
           "provider_request_id": "req_011CfLccJ59tfgbkqPPkEajh",
           "finish_reason": "stop",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
           "raw": {
-            "usage": {
-              "output_tokens": 46,
-              "input_tokens": 110,
-              "cache_creation_input_tokens": 0,
-              "cache_creation": {
-                "ephemeral_5m_input_tokens": 0,
-                "ephemeral_1h_input_tokens": 0
-              },
-              "cache_read_input_tokens": 0
-            },
+            "container": null,
+            "content": [
+              {
+                "text": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"A local gathering for Rust programming language enthusiasts in Seattle to share projects, discuss best practices, and network with fellow developers.\"}",
+                "type": "text"
+              }
+            ],
+            "id": "msg_011CfLccJXwwVViewZoCv3tS",
+            "model": "claude-sonnet-4-6",
+            "role": "assistant",
+            "stop_details": null,
             "stop_reason": "end_turn",
-            "message_id": "msg_011CfLccJXwwVViewZoCv3tS",
-            "model": "claude-sonnet-4-6"
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "inference_geo": "global",
+              "input_tokens": 110,
+              "output_tokens": 46,
+              "service_tier": "standard"
+            }
           }
         }
       },
@@ -243,11 +273,23 @@
             "part": 0,
             "content": {
               "type": "text",
-              "text": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"A local gathering for Rust programming language enthusiasts in Seattle to share projects, discuss best practices, and network with fellow developers.\"}"
+              "text": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"A local gathering for Rust programming language enthusiasts in Seattle to share projects, discuss best practices, and network with fellow developers.\"}",
+              "native": {
+                "item": {
+                  "text": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"A local gathering for Rust programming language enthusiasts in Seattle to share projects, discuss best practices, and network with fellow developers.\"}",
+                  "type": "text"
+                },
+                "fingerprint": "c6b40431a82f9d2f"
+              }
             }
           }
         }
-      ]
+      ],
+      "stream_origin": {
+        "api": "anthropic.messages",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6"
+      }
     }
   ]
 }

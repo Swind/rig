@@ -16,9 +16,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     completion::{CompletionRequest, CompletionResponse, Message, ModelRef, ProviderCapabilities},
-    embeddings::{EmbeddingResponse, ImageEmbeddingResponse},
+    embeddings::EmbeddingResponse,
     error::ErrorReport,
     id::ConversationId,
+    operation::RerankRequest,
     rerank::RerankResponse,
     streaming::Transcript,
     tool::ToolResult,
@@ -29,8 +30,8 @@ use crate::{
 /// The identity of one dispatch, minted by the dispatcher.
 ///
 /// It is the correlation key between a bus-tap [`EffectRecord`], a hook
-/// observation, and a host's own bookkeeping (a Bevy driver maps it to an
-/// `Entity`). Ids are unique per dispatcher and strictly increasing.
+/// observation, and a host's own bookkeeping (a host driver maps it to its
+/// own handle). Ids are unique per dispatcher and strictly increasing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EffectId(u64);
@@ -412,12 +413,12 @@ pub mod family {
 
     use super::{
         CustomEffect, EffectFamily, EffectKind, EmbedInputs, EmbedOutputs, Family, MemoryOp,
-        MemoryOutcome, Outcome, RerankRequest, RetrieveQuery, RetrievedDocuments, ToolCallRequest,
-        sealed::Sealed,
+        MemoryOutcome, Outcome, RetrieveQuery, RetrievedDocuments, ToolCallRequest, sealed::Sealed,
     };
     use crate::{
         completion::{CompletionRequest, CompletionResponse},
         error::{ErrorKind, ErrorReport},
+        operation::RerankRequest,
         rerank::RerankResponse,
         tool::ToolResult,
     };
@@ -794,16 +795,6 @@ pub enum EmbedInputs {
     Images(Vec<Vec<u8>>),
 }
 
-/// A reranking request: the query and documents a rerank model's call
-/// orders.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RerankRequest {
-    /// The query the documents are ranked against.
-    pub query: String,
-    /// The documents, in input order.
-    pub documents: Vec<String>,
-}
-
 /// A conversation-memory operation: the transcription of
 /// [`ConversationMemory`](crate::memory::ConversationMemory).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -897,7 +888,7 @@ pub enum EmbedOutputs {
     /// Text embeddings.
     Texts(EmbeddingResponse),
     /// Image embeddings.
-    Images(ImageEmbeddingResponse),
+    Images(EmbeddingResponse),
 }
 
 /// The answer to a [`MemoryOp`].
@@ -980,6 +971,11 @@ pub struct EffectRecord {
     /// boundaries. They read back through [`Transcript::parse_prefix`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub events: Option<Transcript>,
+    /// Who a streamed dispatch's reply was from, as its relay stated it
+    /// before the first item, when the items are kept. A replayer sends it
+    /// first, so a replayed stream cut short knows its origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_origin: Option<crate::message::Origin>,
     /// Parent dispatch for a nested handler call, or `None` for a root dispatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<EffectId>,
