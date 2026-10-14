@@ -387,6 +387,52 @@ pub struct ModelDetails {
 #[derive(Default)]
 pub struct ModelDetailsDecoder;
 
+fn copilot_model(entry: &Value) -> Option<CopilotModel> {
+    let text = |value: Option<&Value>, key| value?.str(key).map(str::to_owned);
+    let uint = |value: Option<&Value>, key| u32::try_from(value?.u64(key)?).ok();
+    let flag = |value: Option<&Value>, key| value?.bool(key);
+    let strings = |value: Option<&Value>, key| {
+        value
+            .map(|value| value.arr(key))
+            .unwrap_or_default()
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    };
+
+    let capabilities = entry.at("/capabilities");
+    let limits = entry.at("/capabilities/limits");
+    let supports = entry.at("/capabilities/supports");
+    Some(CopilotModel {
+        id: entry.str("id")?.to_owned(),
+        name: text(Some(entry), "name"),
+        vendor: text(Some(entry), "vendor"),
+        supported_endpoints: strings(Some(entry), "supported_endpoints"),
+        capabilities: CopilotCapabilities {
+            r#type: text(capabilities, "type"),
+            family: text(capabilities, "family"),
+            limits: CopilotLimits {
+                max_context_window_tokens: uint(limits, "max_context_window_tokens"),
+                max_prompt_tokens: uint(limits, "max_prompt_tokens"),
+                max_output_tokens: uint(limits, "max_output_tokens"),
+                max_non_streaming_output_tokens: uint(limits, "max_non_streaming_output_tokens"),
+            },
+            supports: CopilotSupports {
+                reasoning_effort: strings(supports, "reasoning_effort"),
+                min_thinking_budget: uint(supports, "min_thinking_budget"),
+                max_thinking_budget: uint(supports, "max_thinking_budget"),
+                adaptive_thinking: flag(supports, "adaptive_thinking"),
+                tool_calls: flag(supports, "tool_calls"),
+                parallel_tool_calls: flag(supports, "parallel_tool_calls"),
+                streaming: flag(supports, "streaming"),
+                structured_outputs: flag(supports, "structured_outputs"),
+                vision: flag(supports, "vision"),
+            },
+        },
+    })
+}
+
 impl<'id> Decoder<'id, CopilotModelListing> for ModelDetailsDecoder {
     type Event = Value;
 
@@ -399,11 +445,7 @@ impl<'id> Decoder<'id, CopilotModelListing> for ModelDetailsDecoder {
         event: Value,
         out: Out<'id, CopilotModelListing>,
     ) -> Result<Flow, ProviderError> {
-        let models = event
-            .arr("data")
-            .iter()
-            .filter_map(|entry| serde_json::from_value(entry.clone()).ok())
-            .collect();
+        let models = event.arr("data").iter().filter_map(copilot_model).collect();
         Ok(out.end(models))
     }
 }
