@@ -564,7 +564,7 @@ async fn rejected_input_does_not_download_or_call_model() -> Result<(), Box<dyn 
 async fn two_slack_turns_share_history_and_preserve_native_tables()
 -> Result<(), Box<dyn std::error::Error>> {
     use rig_core::{
-        message::Message,
+        message::{AssistantContent, Message},
         test_utils::{MockCompletionModel, MockStreamEvent},
     };
     let table = "| a | b |\n|---|---|\n| c | d |";
@@ -610,7 +610,11 @@ async fn two_slack_turns_share_history_and_preserve_native_tables()
     assert!(
         model.requests()[1]
             .chat_history
-            .contains(&Message::assistant(table))
+            .iter()
+            .any(|message| matches!(
+                message,
+                Message::Assistant(reply) if reply.content == [AssistantContent::text(table)]
+            ))
     );
     assert!(
         model.requests()[1]

@@ -1,7 +1,7 @@
 #![allow(clippy::panic_in_result_fn, clippy::indexing_slicing)]
 use super::*;
 use rig_core::{
-    message::Message,
+    message::{AssistantContent, Message},
     test_utils::{MockCompletionModel, MockStreamEvent},
 };
 
@@ -37,7 +37,11 @@ async fn piped_lines_preserve_order_and_history_without_edits_or_reactions()
     assert!(
         model.requests()[1]
             .chat_history
-            .contains(&Message::assistant("reply one"))
+            .iter()
+            .any(|message| matches!(
+                message,
+                Message::Assistant(reply) if reply.content == [AssistantContent::text("reply one")]
+            ))
     );
     assert!(model.requests()[1].chat_history.contains(&Message::user(
         "Platform: stdio\nChannel: local\nSender: user (local)\n\nfirst"

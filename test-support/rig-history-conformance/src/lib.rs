@@ -49,6 +49,7 @@ pub const HISTORY_WIRES: &[&str] = &[
     "anthropic_zai",
     "anthropic_minimax",
     "anthropic_xiaomimimo",
+    "anthropic_opencode-go",
     "openai_responses",
     "chatgpt",
     "copilot",

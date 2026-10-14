@@ -8,6 +8,7 @@
 pub mod anthropic;
 pub mod anthropic_minimax;
 pub mod anthropic_moonshot;
+pub mod anthropic_opencode_go;
 pub mod anthropic_xiaomimimo;
 pub mod anthropic_zai;
 pub mod azure;
@@ -46,6 +47,7 @@ pub const SUITE_WIRES: &[&str] = &[
     mock::HISTORY_WIRE,
     anthropic::HISTORY_WIRE,
     anthropic_moonshot::HISTORY_WIRE,
+    anthropic_opencode_go::HISTORY_WIRE,
     anthropic_zai::HISTORY_WIRE,
     anthropic_minimax::HISTORY_WIRE,
     anthropic_xiaomimimo::HISTORY_WIRE,
