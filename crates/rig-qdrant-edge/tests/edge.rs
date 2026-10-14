@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use rig_core::{
     embeddings::EmbeddingsBuilder,
     vector_store::{
-        InsertDocuments, VectorSearchRequest, VectorStoreIndex,
+        InsertDocuments, VectorSearchRequest, VectorSearchResult, VectorStoreIndex,
         request::{Filter, SearchFilter},
     },
 };
@@ -124,21 +124,21 @@ async fn flushed_shard_reopens_with_payload_and_search_results() -> Result<()> {
     drop(index);
 
     let reopened = QdrantEdgeVectorStore::open(&path, local_embedding_model(), "dense", 3).await?;
-    let results: Vec<(f64, String, Chunk)> = reopened.top_n(request("database", 5)).await?;
+    let results: Vec<VectorSearchResult<Chunk>> = reopened.top_n(request("database", 5)).await?;
     ensure!(results.len() == 2, "expected both persisted chunks");
     let best = results
         .first()
         .context("search returned no persisted chunks")?;
     ensure!(
-        best.2.document_id == "qdrant-guide",
+        best.document.document_id == "qdrant-guide",
         "expected matching chunk first"
     );
     ensure!(
-        best.2.source == "qdrant-guide.md",
+        best.document.source == "qdrant-guide.md",
         "source provenance was lost"
     );
     ensure!(
-        best.2.metadata.get("section") == Some(&serde_json::json!("intro")),
+        best.document.metadata.get("section") == Some(&serde_json::json!("intro")),
         "metadata was lost"
     );
     Ok(())
@@ -183,11 +183,11 @@ async fn schema_mismatches_and_create_on_existing_data_are_rejected() -> Result<
     );
 
     let preserved = QdrantEdgeVectorStore::open(&path, local_embedding_model(), "dense", 3).await?;
-    let results: Vec<(f64, String, Chunk)> = preserved.top_n(request("database", 1)).await?;
+    let results: Vec<VectorSearchResult<Chunk>> = preserved.top_n(request("database", 1)).await?;
     ensure!(
         results
             .first()
-            .is_some_and(|result| result.2.document_id == "one"),
+            .is_some_and(|result| result.document.document_id == "one"),
         "failed schema operations changed stored data"
     );
     Ok(())
@@ -234,24 +234,27 @@ async fn ranked_document_and_id_search_honor_limit_and_filters() -> Result<()> {
     )
     .await?;
 
-    let ranked: Vec<(f64, String, Chunk)> = index.top_n(request("database", 2)).await?;
+    let ranked: Vec<VectorSearchResult<Chunk>> = index.top_n(request("database", 2)).await?;
     ensure!(ranked.len() == 2, "sample count should cap results");
     let best = ranked.first().context("search returned no ranked chunks")?;
     let second = ranked
         .get(1)
         .context("search returned fewer than two chunks")?;
-    ensure!(best.0 >= second.0, "results should be ranked by score");
     ensure!(
-        best.2.document_id == "alice-qdrant",
+        best.score >= second.score,
+        "results should be ranked by score"
+    );
+    ensure!(
+        best.document.document_id == "alice-qdrant",
         "closest result should rank first"
     );
     let ids = index.top_n_ids(request("database", 2)).await?;
     ensure!(ids.len() == 2, "id search should honor sample count");
     ensure!(
-        ids.first().map(|result| result.1.as_str()) == Some(best.1.as_str()),
+        ids.first().map(|result| result.id.as_str()) == Some(best.id.as_str()),
         "document and ID searches should agree"
     );
-    let thresholded: Vec<(f64, String, Chunk)> = index
+    let thresholded: Vec<VectorSearchResult<Chunk>> = index
         .top_n(
             VectorSearchRequest::builder()
                 .query("database")
@@ -268,7 +271,7 @@ async fn ranked_document_and_id_search_honor_limit_and_filters() -> Result<()> {
     let filter = Filter::eq("user_id", serde_json::json!("alice"))
         .and(Filter::gt("rating", serde_json::json!(2)))
         .and(Filter::lt("rating", serde_json::json!(6)));
-    let filtered: Vec<(f64, String, Chunk)> = index
+    let filtered: Vec<VectorSearchResult<Chunk>> = index
         .top_n(
             VectorSearchRequest::builder()
                 .query("database")
@@ -282,7 +285,9 @@ async fn ranked_document_and_id_search_honor_limit_and_filters() -> Result<()> {
         "combined user and range filters should match two rows"
     );
     ensure!(
-        filtered.iter().all(|result| result.2.user_id == "alice"),
+        filtered
+            .iter()
+            .all(|result| result.document.user_id == "alice"),
         "user filter leaked"
     );
 
@@ -290,7 +295,7 @@ async fn ranked_document_and_id_search_honor_limit_and_filters() -> Result<()> {
         "document_id",
         serde_json::json!("alice-cooking"),
     ));
-    let selected: Vec<(f64, String, Chunk)> = index
+    let selected: Vec<VectorSearchResult<Chunk>> = index
         .top_n(
             VectorSearchRequest::builder()
                 .query("database")
@@ -321,12 +326,12 @@ async fn separate_shards_isolate_datasets_and_multiple_embeddings_keep_provenanc
         vec![chunk("second", "Qdrant database", "alice", 1)],
     )
     .await?;
-    let other: Vec<(f64, String, Chunk)> = second.top_n(request("database", 10)).await?;
+    let other: Vec<VectorSearchResult<Chunk>> = second.top_n(request("database", 10)).await?;
     ensure!(
         other.len() == 1
             && other
                 .first()
-                .is_some_and(|result| result.2.document_id == "second"),
+                .is_some_and(|result| result.document.document_id == "second"),
         "datasets mixed records"
     );
 
@@ -342,19 +347,21 @@ async fn separate_shards_isolate_datasets_and_multiple_embeddings_keep_provenanc
         .build()
         .await?;
     multi.insert_documents(embedded).await?;
-    let results: Vec<(f64, String, MultiChunk)> = multi.top_n(request("database", 10)).await?;
+    let results: Vec<VectorSearchResult<MultiChunk>> = multi.top_n(request("database", 10)).await?;
     ensure!(
         results.len() == 2,
         "each embedding should produce one point"
     );
     ensure!(
-        results.iter().all(|result| result.2.source == "manual.md"),
+        results
+            .iter()
+            .all(|result| result.document.source == "manual.md"),
         "payload provenance changed"
     );
     let first = results.first().context("first embedded point missing")?;
     let second = results.get(1).context("second embedded point missing")?;
     ensure!(
-        first.1 != second.1,
+        first.id != second.id,
         "generated point IDs should be distinct"
     );
     Ok(())

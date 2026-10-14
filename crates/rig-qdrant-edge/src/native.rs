@@ -9,7 +9,8 @@ use rig_core::{
     DynModel,
     embeddings::Embedding,
     vector_store::{
-        InsertDocuments, VectorStoreError, VectorStoreIndex,
+        InsertDocuments, VectorSearchIdResult, VectorSearchResult, VectorStoreError,
+        VectorStoreIndex,
         request::{Filter, FilterError, VectorSearchRequest},
     },
     wasm_compat::WasmCompatSend,
@@ -152,24 +153,23 @@ impl QdrantEdgeVectorStore {
     ) -> Result<Vec<qdrant_edge::ScoredPoint>, VectorStoreError> {
         let query_text = request.query().trim();
         if query_text.is_empty() {
-            return Err(VectorStoreError::BuilderError(
-                "query must not be empty".to_owned(),
-            ));
+            return Err(invalid("query must not be empty".to_owned()));
         }
         let limit = usize::try_from(request.samples()).map_err(|_| {
-            VectorStoreError::BuilderError("sample count exceeds this platform's limit".to_owned())
+            VectorStoreError::SamplesOutOfRange {
+                requested: request.samples(),
+                max: usize::MAX as u64,
+            }
         })?;
         if limit == 0 {
-            return Err(VectorStoreError::BuilderError(
-                "sample count must be greater than zero".to_owned(),
-            ));
+            return Err(invalid("sample count must be greater than zero".to_owned()));
         }
         let threshold = request
             .threshold()
             .map(|threshold| {
                 let threshold_f32 = threshold as f32;
                 if !threshold.is_finite() || !threshold_f32.is_finite() {
-                    return Err(VectorStoreError::BuilderError(
+                    return Err(invalid(
                         "score threshold must be finite and representable as f32".to_owned(),
                     ));
                 }
@@ -177,7 +177,7 @@ impl QdrantEdgeVectorStore {
             })
             .transpose()?;
 
-        let filter = request.filter().as_ref().map(filter_to_edge).transpose()?;
+        let filter = request.filter().map(filter_to_edge).transpose()?;
         let vector = self.query_vector(query_text).await?;
         let query = QueryRequest {
             prefetches: Vec::new(),
@@ -210,13 +210,13 @@ impl InsertDocuments for QdrantEdgeVectorStore {
         let mut points = Vec::new();
         for (document, embeddings) in documents {
             if embeddings.is_empty() {
-                return Err(VectorStoreError::BuilderError(
+                return Err(invalid(
                     "each document must contain at least one embedding".to_owned(),
                 ));
             }
             let payload = serde_json::to_value(document)?;
             if !payload.is_object() {
-                return Err(VectorStoreError::BuilderError(
+                return Err(invalid(
                     "Qdrant Edge payloads must serialize as JSON objects".to_owned(),
                 ));
             }
@@ -252,17 +252,21 @@ impl VectorStoreIndex for QdrantEdgeVectorStore {
     async fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         request: VectorSearchRequest<Self::Filter>,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchResult<T>>, VectorStoreError> {
         self.search(request, true)
             .await?
             .into_iter()
             .map(|point| {
                 let id = stringify_id(point.id);
-                let payload = point.payload.ok_or_else(|| {
-                    VectorStoreError::BuilderError("search result has no payload".to_owned())
-                })?;
+                let payload = point
+                    .payload
+                    .ok_or_else(|| invalid("search result has no payload".to_owned()))?;
                 let payload = serde_json::to_value(payload)?;
-                Ok((point.score as f64, id, serde_json::from_value(payload)?))
+                Ok(VectorSearchResult {
+                    score: point.score as f64,
+                    id,
+                    document: serde_json::from_value(payload)?,
+                })
             })
             .collect()
     }
@@ -270,14 +274,21 @@ impl VectorStoreIndex for QdrantEdgeVectorStore {
     async fn top_n_ids(
         &self,
         request: VectorSearchRequest<Self::Filter>,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchIdResult>, VectorStoreError> {
         Ok(self
             .search(request, false)
             .await?
             .into_iter()
-            .map(|point| (point.score as f64, stringify_id(point.id)))
+            .map(|point| VectorSearchIdResult {
+                score: point.score as f64,
+                id: stringify_id(point.id),
+            })
             .collect())
     }
+}
+
+fn invalid(message: impl Into<String>) -> VectorStoreError {
+    VectorStoreError::DatastoreError(message.into().into())
 }
 
 fn validate_model_and_schema(
@@ -286,18 +297,16 @@ fn validate_model_and_schema(
     dimensions: usize,
 ) -> Result<(), VectorStoreError> {
     if vector_name.is_empty() {
-        return Err(VectorStoreError::BuilderError(
-            "vector name must not be empty".to_owned(),
-        ));
+        return Err(invalid("vector name must not be empty".to_owned()));
     }
     if dimensions == 0 {
-        return Err(VectorStoreError::BuilderError(
+        return Err(invalid(
             "vector dimensions must be greater than zero".to_owned(),
         ));
     }
     let model_dimensions = model.capabilities().ndims;
     if model_dimensions != 0 && model_dimensions != dimensions {
-        return Err(VectorStoreError::BuilderError(format!(
+        return Err(invalid(format!(
             "embedding model reports {model_dimensions} dimensions, but the shard is configured for {dimensions}"
         )));
     }
@@ -310,12 +319,12 @@ fn validate_config(
     dimensions: usize,
 ) -> Result<(), VectorStoreError> {
     let params = config.vectors.get(vector_name).ok_or_else(|| {
-        VectorStoreError::BuilderError(format!(
+        invalid(format!(
             "Qdrant Edge shard has no vector named {vector_name:?}"
         ))
     })?;
     if params.size != dimensions || params.distance != Distance::Cosine {
-        return Err(VectorStoreError::BuilderError(format!(
+        return Err(invalid(format!(
             "Qdrant Edge vector {vector_name:?} has dimension {} and distance {:?}; expected dimension {dimensions} and Cosine",
             params.size, params.distance
         )));
@@ -328,7 +337,7 @@ fn validate_embedding(
     dimensions: usize,
 ) -> Result<Vec<f32>, VectorStoreError> {
     if embedding.vec.len() != dimensions {
-        return Err(VectorStoreError::BuilderError(format!(
+        return Err(invalid(format!(
             "embedding has {} dimensions, expected {dimensions}",
             embedding.vec.len()
         )));
@@ -339,12 +348,12 @@ fn validate_embedding(
         .map(|value| *value as f32)
         .collect::<Vec<_>>();
     if vector.iter().any(|value| !value.is_finite()) {
-        return Err(VectorStoreError::BuilderError(
+        return Err(invalid(
             "embedding values must be finite and representable as f32".to_owned(),
         ));
     }
     if vector.iter().all(|value| *value == 0.0) {
-        return Err(VectorStoreError::BuilderError(
+        return Err(invalid(
             "Cosine embeddings must not be zero vectors".to_owned(),
         ));
     }

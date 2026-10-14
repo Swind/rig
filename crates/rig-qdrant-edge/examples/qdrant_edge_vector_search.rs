@@ -2,7 +2,7 @@ use anyhow::Result;
 use rig_core::{
     embeddings::EmbeddingsBuilder,
     vector_store::{
-        InsertDocuments, VectorSearchRequest, VectorStoreIndex,
+        InsertDocuments, VectorSearchRequest, VectorSearchResult, VectorStoreIndex,
         request::{Filter, SearchFilter},
     },
 };
@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
     drop(index);
     let index = QdrantEdgeVectorStore::open(&path, model, "dense", 3).await?;
 
-    let all: Vec<(f64, String, Chunk)> = index
+    let all: Vec<VectorSearchResult<Chunk>> = index
         .top_n(
             VectorSearchRequest::builder()
                 .query("qdrant database")
@@ -80,12 +80,17 @@ async fn main() -> Result<()> {
         )
         .await?;
     println!("Unfiltered matches:");
-    for (score, id, chunk) in all {
+    for VectorSearchResult {
+        score,
+        id,
+        document: chunk,
+    } in all
+    {
         println!("{score:.3}  {id}  {} ({})", chunk.text, chunk.source);
     }
 
     let knowledge = Filter::eq("namespace", serde_json::json!("knowledge"));
-    let filtered: Vec<(f64, String, Chunk)> = index
+    let filtered: Vec<VectorSearchResult<Chunk>> = index
         .top_n(
             VectorSearchRequest::builder()
                 .query("qdrant database")
@@ -95,7 +100,12 @@ async fn main() -> Result<()> {
         )
         .await?;
     println!("Knowledge matches:");
-    for (score, id, chunk) in filtered {
+    for VectorSearchResult {
+        score,
+        id,
+        document: chunk,
+    } in filtered
+    {
         println!("{score:.3}  {id}  {} ({})", chunk.text, chunk.source);
     }
 
