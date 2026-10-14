@@ -1745,8 +1745,11 @@ omit; `top_p`, `stop` supported; `seed`, `parallel_tool_calls` [unverified].
 `stop` `"stop":[..]`, at most 4.
 
 **Copilot** (`"copilot"`, Chat route for non-codex models): no public API
-reference. `Effort(e)` `"reasoning_effort":"<e>"` for GPT models, levels from
-the catalog [unverified]; every other cell unsupported until recorded.
+reference. `Effort(e)` `"reasoning_effort":"<e>"` for every model family, as
+the Copilot CLI sends it (the Copilot SDK's e2e suite asserts it), levels from
+the catalog; `Off` `"reasoning_effort":"none"` unless the catalog says the
+model cannot turn it off; `Budget` unsupported. Every other cell unsupported
+until recorded.
 
 **Hugging Face router** (`"huggingface"`): OpenAI JSON for every field
 [unverified]; support depends on the sub-provider, so under the notation rule
@@ -2295,6 +2298,7 @@ until it is listed here and the golden is regenerated.
 | Catalog | Bedrock Converse: a model id is read through Bedrock's own catalog rows (each Bedrock Claude row carries Anthropic's reasoning options and facts), falling back past a cross-region prefix (`jp.`) and a `-vN[:M]` revision, replacing `claude_spec` from the P3 row above. A Claude id no Bedrock row lists, under either fallback, is unlisted: `high` is refused, `Off` sends `thinking: disabled` (35 golden cells); listed profiles and dated ids now find their row (88 cells in all) | Bedrock callers using an id the catalog does not list | "Use a Bedrock model or profile id the catalog lists, or add a row with `Catalog::insert` or an override file." |
 | Catalog | Cost: a catalog-priced cost whose cache read or write tokens have no listed rate leaves that part `None`, and `Cost::is_complete()` is false, where the part was priced at the input rate; the `total` sums the known parts | callers reading `cost.cache_read`, `cost.cache_write` or `cost.total` from catalog pricing | "Check `cost.is_complete()` before treating `total` as the whole charge; a cache part is `None` when the catalog has no rate for it." |
 | Catalog | Refresh: `Catalog::with_models_dev` lays a fetched models.dev copy over the built-in catalog without replacing the keys the built-in rows pin under `rig.pinned` (the hand-reviewed facts and the generator's joins); `with_overrides` replaces every key it is given | applications that refresh the catalog from models.dev | "Lay a fetched models.dev copy on with `with_models_dev`, not `with_overrides`, so rig's reviewed facts survive the refresh." |
+| Copilot | Copilot Chat Completions (every model not routed to Responses): `reasoning` is mapped instead of refused as unverified (`openai::options::copilot_chat`). `Effort(e)` sends `"reasoning_effort":"<e>"` and `Off` sends `"reasoning_effort":"none"`, both checked against the Copilot catalog row (a level the row does not list, or `Off` where it cannot turn reasoning off, is refused); `Budget` is refused as an effort-only control. The field follows the Copilot CLI, whose requests to `/chat/completions` carry a top-level `reasoning_effort` for Claude and GPT models alike (Copilot SDK e2e suite). Every other option stays refused. The golden moves only in its `off`, `high` and `budget` shapes on `chat\|copilot` and `copilot\|copilot` | Copilot callers who set `reasoning` on a Chat-routed model | "On GitHub Copilot, `GenerationOptions::reasoning` now sets `reasoning_effort` on Chat Completions models too, where it was refused; `Reasoning::Budget` is still refused." |
 | P4 | Bedrock: the guardrail is sent on streams as well as unary requests (`crates/rig-bedrock/src/request.rs:135` filters it to unary today) | streaming callers of `with_guardrail` | "A Bedrock guardrail now also applies to streamed requests." |
 
 ### 12.1 P2: options

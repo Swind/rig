@@ -539,7 +539,7 @@ pub(crate) fn chat_options(
     } else if is(&HUGGINGFACE) || is(&HYPERBOLIC) || is(&DOUBLEWORD) {
         refuse_all(fields, "unverified for this provider")
     } else if name == crate::providers::copilot::wire::DIALECT.name {
-        refuse_all(fields, "unverified for copilot")
+        copilot_chat(facts, model, fields)
     } else {
         refuse_all(
             fields,
@@ -723,6 +723,42 @@ fn openrouter(facts: &ModelFacts, model: &str, fields: OptionFields<'_>) -> Opti
         top_p: Mapping::of(top_p, |top_p| send("top_p", top_p)),
         seed: Mapping::of(seed, |seed| send("seed", seed)),
         stop: Mapping::of_stop(stop, |stop| stop_list(stop, Some(4), "stop")),
+    }
+}
+
+/// Copilot's Chat Completions route: no public reference; `reasoning_effort`
+/// follows the Copilot CLI's requests, for every model family it serves.
+fn copilot_chat(facts: &ModelFacts, model: &str, fields: OptionFields<'_>) -> OptionMap {
+    let OptionFields {
+        reasoning,
+        cache,
+        service_tier,
+        verbosity,
+        parallel_tool_calls,
+        top_p,
+        seed,
+        stop,
+    } = fields;
+    const UNVERIFIED: &str = "unverified for copilot";
+    OptionMap {
+        reasoning: Mapping::of(reasoning, |reasoning| {
+            catalog_effort(
+                facts,
+                crate::providers::copilot::wire::DIALECT.name,
+                model,
+                reasoning,
+                "Copilot takes an effort level, not a budget",
+            )
+        }),
+        cache: Mapping::of(cache, |_| Mapping::unsupported(UNVERIFIED)),
+        service_tier: Mapping::of(service_tier, |_| Mapping::unsupported(UNVERIFIED)),
+        verbosity: Mapping::of(verbosity, |_| Mapping::unsupported(UNVERIFIED)),
+        parallel_tool_calls: Mapping::of(parallel_tool_calls, |_| {
+            Mapping::unsupported(UNVERIFIED)
+        }),
+        top_p: Mapping::of(top_p, |_| Mapping::unsupported(UNVERIFIED)),
+        seed: Mapping::of(seed, |_| Mapping::unsupported(UNVERIFIED)),
+        stop: Mapping::of_stop(stop, |_| Mapping::unsupported(UNVERIFIED)),
     }
 }
 
