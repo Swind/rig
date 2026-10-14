@@ -318,7 +318,7 @@ impl SlackAdapter {
             {
                 // Unsupported markdown blocks can degrade to the accessibility text.
                 if let Some(object) = body.as_object_mut() {
-                    object.remove("blocks");
+                    object.shift_remove("blocks");
                     object.insert("mrkdwn".into(), json!(false));
                 }
                 self.api(method, &body, &self.token).await
