@@ -1761,7 +1761,11 @@ against the Copilot facts for the model: `Effort(e)` sends
 `output_config.effort`, with `thinking: {"type":"adaptive"}` where the entry
 lists `adaptive_thinking`; `Budget` sends `thinking.budget_tokens` where the
 entry lists a thinking budget; `Off` sends `thinking: {"type":"disabled"}`.
-Every other cell unsupported until recorded.
+`cache` follows Anthropic's top-level marker (section 6.1): `Short`
+`"cache_control":{"type":"ephemeral"}`, `Long` adds `"ttl":"1h"`, `None`
+omitted (measured: without a marker the endpoint caches nothing; with either
+marker the next call reads the cached prefix). Every other cell unsupported
+until recorded.
 
 **Hugging Face router** (`"huggingface"`): OpenAI JSON for every field
 [unverified]; support depends on the sub-provider, so under the notation rule

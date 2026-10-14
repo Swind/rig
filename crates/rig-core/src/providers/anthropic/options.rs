@@ -368,8 +368,10 @@ fn implicit_cache_gateway(fields: OptionFields<'_>) -> OptionMap {
 /// GitHub Copilot's Messages endpoint: Claude's `thinking` and
 /// `output_config`, checked against the Copilot facts for `model` (the
 /// spec [`completion_for`](crate::providers::copilot::Copilot::completion_for)
-/// binds from `/models`, else the catalog's Copilot row). No other option
-/// is recorded.
+/// binds from `/models`, else the catalog's Copilot row), and Anthropic's
+/// top-level `cache_control` for `cache` (measured: without a marker the
+/// endpoint caches nothing; with one, the next call reads the prefix, `ttl`
+/// `1h` included). No other option is recorded.
 fn copilot(
     wire: &Messages,
     model: &str,
@@ -388,11 +390,22 @@ fn copilot(
     } = fields;
     const UNVERIFIED: &str = "unverified for copilot";
     let spec = wire.facts.for_model(COPILOT.name, model);
+    let places = wire.prompt_caching || wire.static_prefix_cache_ttl.is_some();
     OptionMap {
         reasoning: Mapping::of(reasoning, |reasoning| {
             claude_reasoning(spec, reasoning, max_tokens)
         }),
-        cache: Mapping::of(cache, |_| Mapping::unsupported(UNVERIFIED)),
+        cache: Mapping::of(cache, |cache| match cache {
+            CacheRetention::None if places => Mapping::unsupported(
+                "the wire places cache markers (`with_prompt_caching` or \
+                 `with_static_prefix_cache_ttl`)",
+            ),
+            CacheRetention::None => Mapping::Omit("no cache marker is sent"),
+            CacheRetention::Short => Mapping::Send(json!({"cache_control": {"type": "ephemeral"}})),
+            CacheRetention::Long => {
+                Mapping::Send(json!({"cache_control": {"type": "ephemeral", "ttl": "1h"}}))
+            }
+        }),
         service_tier: Mapping::of(service_tier, |_| Mapping::unsupported(UNVERIFIED)),
         verbosity: Mapping::of(verbosity, |_| Mapping::unsupported(UNVERIFIED)),
         parallel_tool_calls: Mapping::of(parallel, |_| Mapping::unsupported(UNVERIFIED)),

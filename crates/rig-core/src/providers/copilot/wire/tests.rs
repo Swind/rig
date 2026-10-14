@@ -571,6 +571,42 @@ async fn messages_reasoning_follows_the_listing() {
     assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
 }
 
+/// Copilot's Messages endpoint caches only behind a marker, so the typed
+/// `cache` option sends Anthropic's top-level `cache_control`.
+#[tokio::test]
+async fn messages_cache_sends_the_top_level_marker() {
+    use crate::completion::{CacheRetention, GenerationOptions};
+    let models = recorded_models().await;
+    let opus = copilot().completion_for(&recorded(&models, "claude-opus-4.7"));
+
+    let (_, body) = sent_with(
+        &opus,
+        GenerationOptions::default().cache(CacheRetention::Short),
+    )
+    .expect("short retention is a marker");
+    assert_eq!(
+        body["cache_control"],
+        serde_json::json!({"type": "ephemeral"})
+    );
+    let (_, body) = sent_with(
+        &opus,
+        GenerationOptions::default().cache(CacheRetention::Long),
+    )
+    .expect("long retention is a marker with a ttl");
+    assert_eq!(
+        body["cache_control"],
+        serde_json::json!({"type": "ephemeral", "ttl": "1h"})
+    );
+    let (_, body) = sent_with(
+        &opus,
+        GenerationOptions::default().cache(CacheRetention::None),
+    )
+    .expect("no retention is no marker");
+    assert!(body.get("cache_control").is_none());
+    let (_, body) = sent_with(&opus, GenerationOptions::default()).expect("no option");
+    assert!(body.get("cache_control").is_none());
+}
+
 #[tokio::test]
 async fn openai_shaped_reasoning_follows_the_listing() {
     use crate::completion::{Effort, GenerationOptions, Reasoning};
