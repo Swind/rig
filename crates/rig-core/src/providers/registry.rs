@@ -354,6 +354,16 @@ impl ProviderId {
             .map(|registered| ProviderId(Kind::Registered(registered)))
     }
 
+    /// The selection of an OpenAI-shaped `dialect` this build registers.
+    pub(crate) fn of_openai(dialect: &openai::wire::Dialect) -> Self {
+        Self(Kind::Registered(Registered::OpenAi(*dialect)))
+    }
+
+    /// The selection of a Messages-format `dialect` this build registers.
+    pub(crate) fn of_messages(dialect: &anthropic::wire::Dialect) -> Self {
+        Self(Kind::Registered(Registered::Anthropic(*dialect)))
+    }
+
     /// The selection `vendor` names in `format`, or `None` when this build
     /// registers no such pair.
     pub fn new(vendor: &str, format: Format) -> Option<Self> {
@@ -361,9 +371,10 @@ impl ProviderId {
             Format::OpenAi => {
                 openai::wire::by_name(vendor).map(|dialect| Registered::OpenAi(*dialect))
             }
-            Format::Anthropic => {
-                anthropic::wire::Dialect::by_name(vendor).map(Registered::Anthropic)
-            }
+            Format::Anthropic => anthropic::wire::all()
+                .find(|dialect| dialect.name == vendor)
+                .copied()
+                .map(Registered::Anthropic),
             Format::Gemini => (vendor == gemini::PROVIDER_NAME).then_some(Registered::Gemini),
         };
         registered.map(|registered| Self(Kind::Registered(registered)))

@@ -139,6 +139,25 @@ const ALL: &[&Dialect] = &[
     &OPENCODE_GO,
 ];
 
+/// Dialects reached only through their provider's own wire, which adds an
+/// envelope the plain Messages client lacks. They resolve by name, so a
+/// wire on one reloads, but the registry does not offer them.
+const WRAPPED: &[&Dialect] = &[&COPILOT];
+
+/// GitHub Copilot's Messages-format endpoint, which serves the models whose
+/// `/models` entry lists `/v1/messages`. Copilot replaces `x-api-key` with
+/// its own envelope, which
+/// [`CopilotWire`](crate::providers::copilot::wire::CopilotWire) stamps.
+pub const COPILOT: Dialect = Dialect {
+    request_id_header: crate::providers::copilot::wire::REQUEST_ID_HEADER,
+    ..compatible(
+        crate::providers::copilot::PROVIDER_NAME,
+        crate::providers::copilot::GITHUB_COPILOT_API_BASE_URL,
+        "GITHUB_COPILOT_API_KEY",
+        Some("GITHUB_COPILOT_API_BASE"),
+    )
+};
+
 /// OpenCode Go's Messages-format endpoint. The caller supplies session headers.
 pub const OPENCODE_GO: Dialect = compatible(
     "opencode-go",
@@ -155,7 +174,10 @@ pub fn all() -> impl Iterator<Item = &'static Dialect> {
 impl Dialect {
     /// The dialect this crate ships under `name`.
     pub fn by_name(name: &str) -> Option<Self> {
-        all().copied().find(|dialect| dialect.name == name)
+        all()
+            .chain(WRAPPED.iter().copied())
+            .copied()
+            .find(|dialect| dialect.name == name)
     }
 }
 

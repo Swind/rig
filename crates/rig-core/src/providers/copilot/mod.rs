@@ -4,18 +4,22 @@
 //! a device code or refresh a GitHub token, pass an [`auth::Authenticator`] to
 //! [`Copilot::authenticate`], which resolves the session through the client's
 //! own transport.
-//! Completion routes are selected by model; all routes include editor-identity headers.
+//! [`Copilot::completion_for`] sends each model to the endpoint its `/models`
+//! entry lists (Messages, Chat Completions or Responses) and checks reasoning
+//! options against the controls it lists; [`Copilot::completion`] routes by
+//! id alone. Every route carries the editor-identity headers.
 //!
 //! ```no_run
 //! use rig_core::providers::copilot;
 //!
-//! # fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let github = copilot::Copilot::from_env()?;
 //!
-//! let chat = github.completion(copilot::GPT_4O);
+//! let models = github.models().await?;
+//! let completions: Vec<_> = models.iter().map(|model| github.completion_for(model)).collect();
 //! let codex = github.completion(copilot::GPT_5_3_CODEX);
 //! let embeddings = github.embedding(copilot::TEXT_EMBEDDING_3_SMALL, None);
-//! # let _ = (chat, codex, embeddings);
+//! # let _ = (completions, codex, embeddings);
 //! # Ok(())
 //! # }
 //! ```

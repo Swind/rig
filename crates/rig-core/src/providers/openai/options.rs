@@ -753,9 +753,7 @@ fn copilot_chat(facts: &ModelFacts, model: &str, fields: OptionFields<'_>) -> Op
         cache: Mapping::of(cache, |_| Mapping::unsupported(UNVERIFIED)),
         service_tier: Mapping::of(service_tier, |_| Mapping::unsupported(UNVERIFIED)),
         verbosity: Mapping::of(verbosity, |_| Mapping::unsupported(UNVERIFIED)),
-        parallel_tool_calls: Mapping::of(parallel_tool_calls, |_| {
-            Mapping::unsupported(UNVERIFIED)
-        }),
+        parallel_tool_calls: Mapping::of(parallel_tool_calls, |_| Mapping::unsupported(UNVERIFIED)),
         top_p: Mapping::of(top_p, |_| Mapping::unsupported(UNVERIFIED)),
         seed: Mapping::of(seed, |_| Mapping::unsupported(UNVERIFIED)),
         stop: Mapping::of_stop(stop, |_| Mapping::unsupported(UNVERIFIED)),

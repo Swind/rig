@@ -1749,7 +1749,19 @@ reference. `Effort(e)` `"reasoning_effort":"<e>"` for every model family, as
 the Copilot CLI sends it (the Copilot SDK's e2e suite asserts it), levels from
 the catalog; `Off` `"reasoning_effort":"none"` unless the catalog says the
 model cannot turn it off; `Budget` unsupported. Every other cell unsupported
-until recorded.
+until recorded. A wire from `Copilot::completion_for` checks these against
+the facts the model's `/models` entry states (`CopilotModel::spec`: its
+`reasoning_effort` words, `none` among them turning reasoning off) before the
+catalog's.
+
+**Copilot Messages** (`"copilot"` Messages dialect, reached only through
+`CopilotWire` for a model whose `/models` entry lists `/v1/messages`): no
+public API reference. `reasoning` follows Anthropic's shapes (section 6.1)
+against the Copilot facts for the model: `Effort(e)` sends
+`output_config.effort`, with `thinking: {"type":"adaptive"}` where the entry
+lists `adaptive_thinking`; `Budget` sends `thinking.budget_tokens` where the
+entry lists a thinking budget; `Off` sends `thinking: {"type":"disabled"}`.
+Every other cell unsupported until recorded.
 
 **Hugging Face router** (`"huggingface"`): OpenAI JSON for every field
 [unverified]; support depends on the sub-provider, so under the notation rule

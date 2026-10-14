@@ -1,6 +1,9 @@
 //! Copilot configuration and completion, embedding, and catalogue wires.
-//! Completion selects the Responses route for Codex model identifiers and
-//! Chat Completions otherwise. Credentials must be exchanged before encoding.
+//! A completion wire answers on Chat Completions, Responses or Messages:
+//! [`Copilot::completion_for`](crate::providers::copilot::Copilot::completion_for)
+//! picks by the endpoints `/models` lists, and
+//! [`Copilot::completion`](crate::providers::copilot::Copilot::completion)
+//! by the model id alone. Credentials must be exchanged before encoding.
 //!
 //! ```no_run
 //! use rig_core::providers::copilot::{Copilot, GPT_4O};
@@ -16,8 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::env::{self, EnvError};
 use crate::completion::CompletionRequest;
-use crate::error::EncodeError;
+use crate::error::{EncodeError, ProviderError};
 use crate::operation::Completion;
+use crate::providers::anthropic::streaming::MessagesDecoder;
+use crate::providers::anthropic::wire::{AnthropicConfig, Messages};
 use crate::providers::openai::responses_api::SystemInstructionsPlacement;
 /// Copilot's embeddings wire is the shared one, pointed at Copilot by
 /// [`Copilot::embedding`](crate::providers::copilot::Copilot::embedding); the editor envelope is the dialect's modality
@@ -27,13 +32,17 @@ use crate::providers::openai::wire::{
     Dialect, DialectHooks, EmbeddingQuirks, OpenAIConfig, OpenAiDecoder, OpenAiReassembler,
     OpenAiWire, Quirks, ResponsesQuirks, Route,
 };
-use crate::wire::{Body, Descriptor, Encoded, Mode, Secret, Wire};
+use crate::wire::document::{Reassemble, Serves};
+use crate::wire::{
+    Body, Decoder, Descriptor, Encoded, Flow, Mode, Out, Secret, Wire, WireEvent, WireFrame,
+};
 
+use super::model_listing::CopilotModel;
 use super::{CopilotIntent, PROVIDER_NAME};
 
 /// The reply header carrying Copilot's transport request id. Copilot relays
 /// OpenAI's wire on both routes, header included.
-pub(super) const REQUEST_ID_HEADER: Option<&str> = Some("x-request-id");
+pub(crate) const REQUEST_ID_HEADER: Option<&str> = Some("x-request-id");
 
 /// Credential variable named in missing-credential errors.
 const PRIMARY_API_KEY_ENV: &str = "GITHUB_COPILOT_API_KEY";
@@ -76,12 +85,9 @@ pub const DIALECT: Dialect = Dialect {
 
 static HOOKS: DialectHooks = DialectHooks {
     default_endpoint: Some(super::auth::base_url_from_token),
-    model_route: Some(|model| {
-        if routes_through_responses(model) {
-            Route::Responses
-        } else {
-            Route::Chat
-        }
+    model_route: Some(|model| match CopilotEndpoint::for_id(model) {
+        CopilotEndpoint::Responses => Route::Responses,
+        CopilotEndpoint::Chat | CopilotEndpoint::Messages => Route::Chat,
     }),
     completion_envelope: Some(|provider, request, builder| {
         completion_envelope(provider, request, builder, CopilotIntent::default())
@@ -122,6 +128,29 @@ fn completion_envelope(
 /// Return whether `model` contains `codex`, case-insensitively, selecting `/responses`.
 pub fn routes_through_responses(model: &str) -> bool {
     model.to_ascii_lowercase().contains("codex")
+}
+
+/// The endpoint a Copilot completion answers on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CopilotEndpoint {
+    /// `POST /chat/completions`.
+    Chat,
+    /// `POST /responses`.
+    Responses,
+    /// `POST /v1/messages`, Anthropic's Messages format.
+    Messages,
+}
+
+impl CopilotEndpoint {
+    /// The endpoint for `model` when only its id is known: Responses for a
+    /// Codex id ([`routes_through_responses`]), Chat Completions otherwise.
+    pub fn for_id(model: &str) -> Self {
+        if routes_through_responses(model) {
+            Self::Responses
+        } else {
+            Self::Chat
+        }
+    }
 }
 
 /// Copilot's configuration: plain data, credential redacted.
@@ -185,7 +214,33 @@ impl CopilotConfig {
     /// The completion wire for `model`, on whichever route answers it.
     pub(crate) fn completion(&self, model: impl Into<String>) -> CopilotWire {
         CopilotWire {
-            wire: self.openai().completion(model),
+            wire: CopilotRoute::OpenAi(self.openai().completion(model)),
+            intent: CopilotIntent::default(),
+        }
+    }
+
+    /// The completion wire for `model` on the endpoint its listing names,
+    /// encoding with the facts the listing states.
+    pub(crate) fn completion_for(&self, model: &CopilotModel) -> CopilotWire {
+        let facts = crate::catalog::ModelFacts::new(model.spec());
+        let id = model.id.clone();
+        let wire = match model.endpoint() {
+            CopilotEndpoint::Messages => {
+                let messages = self.messages().completion(id).with_facts(facts);
+                CopilotRoute::Messages(match model.default_max_tokens() {
+                    Some(tokens) => messages.with_default_max_tokens(tokens),
+                    None => messages,
+                })
+            }
+            CopilotEndpoint::Chat => {
+                CopilotRoute::OpenAi(OpenAiWire::from(self.openai().chat(id)).with_facts(facts))
+            }
+            CopilotEndpoint::Responses => CopilotRoute::OpenAi(
+                OpenAiWire::from(self.openai().responses(id)).with_facts(facts),
+            ),
+        };
+        CopilotWire {
+            wire,
             intent: CopilotIntent::default(),
         }
     }
@@ -194,6 +249,16 @@ impl CopilotConfig {
     /// Use `ndims` when supplied, otherwise the shared wire's model default.
     pub(crate) fn embedding(&self, model: impl Into<String>, ndims: Option<usize>) -> Embeddings {
         Embeddings::new(self.openai(), model, ndims)
+    }
+
+    /// The shared Messages configuration at this endpoint. Its `x-api-key`
+    /// is replaced by Copilot's envelope when a request is encoded.
+    fn messages(&self) -> AnthropicConfig {
+        AnthropicConfig::with_key(
+            &crate::providers::anthropic::wire::COPILOT,
+            self.api_key.clone(),
+        )
+        .with_base_url(&self.base_url)
     }
 
     /// Convert to shared configuration with Copilot's dialect and explicit endpoint.
@@ -240,13 +305,45 @@ pub(super) fn stamp(
     Ok(())
 }
 
+/// The shared wire a Copilot completion is encoded by.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum CopilotRoute {
+    /// Chat Completions or Responses.
+    OpenAi(OpenAiWire),
+    /// Anthropic's Messages format.
+    Messages(Messages),
+}
+
+impl From<OpenAiWire> for CopilotRoute {
+    fn from(wire: OpenAiWire) -> Self {
+        Self::OpenAi(wire)
+    }
+}
+
+impl From<Messages> for CopilotRoute {
+    fn from(wire: Messages) -> Self {
+        Self::Messages(wire)
+    }
+}
+
+impl CopilotRoute {
+    /// The endpoint this wire posts to.
+    pub fn endpoint(&self) -> CopilotEndpoint {
+        match self {
+            Self::OpenAi(OpenAiWire::Chat(_)) => CopilotEndpoint::Chat,
+            Self::OpenAi(OpenAiWire::Responses(_)) => CopilotEndpoint::Responses,
+            Self::Messages(_) => CopilotEndpoint::Messages,
+        }
+    }
+}
+
 /// Completion wire with Copilot's conversation intent and editor headers.
-/// Delegates payload handling to `wire`, but overrides its request envelope
-/// even when that field contains another dialect.
+/// Delegates payload handling to `wire` and replaces its request envelope
+/// with Copilot's, whichever format `wire` speaks.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CopilotWire {
     /// The route's wire, pointed at Copilot.
-    pub wire: OpenAiWire,
+    pub wire: CopilotRoute,
     /// The conversation intent this turn declares (`openai-intent`).
     pub intent: CopilotIntent,
 }
@@ -273,29 +370,42 @@ impl CopilotWire {
         self.with_intent(CopilotIntent::Edits)
     }
 
+    /// The endpoint this wire posts to.
+    pub fn endpoint(&self) -> CopilotEndpoint {
+        self.wire.endpoint()
+    }
+
     /// The same wire, encoding with `facts` and pricing its replies by
-    /// them, on whichever route answers.
+    /// them, on whichever route answers. On Messages this resets the
+    /// default `max_tokens` to the dialect's.
     pub fn with_facts(mut self, facts: crate::catalog::ModelFacts) -> Self {
-        self.wire = self.wire.with_facts(facts);
+        self.wire = match self.wire {
+            CopilotRoute::OpenAi(wire) => CopilotRoute::OpenAi(wire.with_facts(facts)),
+            CopilotRoute::Messages(wire) => CopilotRoute::Messages(wire.with_facts(facts)),
+        };
         self
     }
 
     /// Sanitize tool schemas for strict mode on whichever route answers.
     ///
     /// The shared [`Responses::new`](crate::providers::openai::responses_api::wire::Responses::new)
-    /// constructor already enables this for Copilot, so this is the chat route's opt-in.
+    /// constructor already enables this for Copilot, so this is the chat
+    /// and Messages routes' opt-in.
     pub fn with_strict_tools(mut self) -> Self {
-        self.wire = self.wire.with_strict_tools();
+        self.wire = match self.wire {
+            CopilotRoute::OpenAi(wire) => CopilotRoute::OpenAi(wire.with_strict_tools()),
+            CopilotRoute::Messages(wire) => CopilotRoute::Messages(wire.with_strict_tools()),
+        };
         self
     }
 
     /// Serialize tool-result content as arrays.
     ///
-    /// A chat-completions shape: the Responses request has one content
-    /// encoding, so this is a no-op on that route.
+    /// A chat-completions shape: a no-op on the other routes.
     pub fn with_tool_result_array_content(mut self) -> Self {
-        if let OpenAiWire::Chat(wire) = self.wire {
-            self.wire = OpenAiWire::Chat(wire.with_tool_result_array_content());
+        if let CopilotRoute::OpenAi(OpenAiWire::Chat(wire)) = self.wire {
+            self.wire =
+                CopilotRoute::OpenAi(OpenAiWire::Chat(wire.with_tool_result_array_content()));
         }
         self
     }
@@ -305,26 +415,133 @@ impl Wire for CopilotWire {
     type Op = Completion;
     type Payload = crate::wire::Encoded;
     type Frame = crate::wire::WireFrame;
-    type Decoder<'id> = OpenAiDecoder;
-    type Reassembler = OpenAiReassembler;
+    type Decoder<'id> = CopilotDecoder;
+    type Reassembler = CopilotReassembler;
 
     fn describe(&self) -> Descriptor<'_> {
-        self.wire.describe()
+        match &self.wire {
+            CopilotRoute::OpenAi(wire) => wire.describe(),
+            CopilotRoute::Messages(wire) => wire.describe(),
+        }
     }
 
     fn encode(&self, request: CompletionRequest, mode: Mode) -> Result<Encoded, EncodeError> {
-        self.wire
-            .encode_with_headers(request, mode, |provider, request, builder| {
-                completion_envelope(provider, request, provider.headers(builder), self.intent)
-            })
+        match &self.wire {
+            CopilotRoute::OpenAi(wire) => {
+                wire.encode_with_headers(request, mode, |provider, request, builder| {
+                    completion_envelope(provider, request, provider.headers(builder), self.intent)
+                })
+            }
+            CopilotRoute::Messages(wire) => {
+                let initiator = super::request_initiator(&request);
+                let has_vision = super::request_has_vision(&request);
+                let mut encoded = wire.encode(request, mode)?;
+                encoded.request.headers_mut().remove("x-api-key");
+                stamp(
+                    &mut encoded.request,
+                    wire.provider.api_key.expose(),
+                    initiator,
+                    has_vision,
+                    self.intent,
+                )?;
+                Ok(encoded)
+            }
+        }
     }
 
     fn decoder<'id>(&self) -> Self::Decoder<'id> {
-        self.wire.decoder()
+        match &self.wire {
+            CopilotRoute::OpenAi(wire) => CopilotDecoder::OpenAi(wire.decoder()),
+            CopilotRoute::Messages(wire) => CopilotDecoder::Messages(wire.decoder()),
+        }
     }
 
     fn reassembler(&self) -> Self::Reassembler {
-        self.wire.reassembler()
+        match &self.wire {
+            CopilotRoute::OpenAi(wire) => CopilotReassembler::OpenAi(wire.reassembler()),
+            CopilotRoute::Messages(wire) => CopilotReassembler::Messages(wire.reassembler()),
+        }
+    }
+}
+
+/// The chosen route's reassembler.
+pub enum CopilotReassembler {
+    /// The Chat Completions or Responses reply document.
+    OpenAi(OpenAiReassembler),
+    /// The Messages reply document.
+    Messages(<Messages as Wire>::Reassembler),
+}
+
+impl Default for CopilotReassembler {
+    fn default() -> Self {
+        Self::OpenAi(OpenAiReassembler::default())
+    }
+}
+
+impl Serves<Completion> for CopilotReassembler {}
+
+impl Reassemble<WireFrame> for CopilotReassembler {
+    fn absorb(&mut self, frame: &WireFrame) {
+        match self {
+            Self::OpenAi(document) => document.absorb(frame),
+            Self::Messages(document) => document.absorb(frame),
+        }
+    }
+
+    fn finish(self) -> serde_json::Value {
+        match self {
+            Self::OpenAi(document) => document.finish(),
+            Self::Messages(document) => document.finish(),
+        }
+    }
+}
+
+/// One classified frame of whichever route is answering.
+pub enum CopilotEvent<'id> {
+    /// A Chat Completions or Responses frame.
+    OpenAi(<OpenAiDecoder as Decoder<'id, Completion>>::Event),
+    /// A Messages frame.
+    Messages(<MessagesDecoder as Decoder<'id, Completion>>::Event),
+}
+
+/// The chosen route's decoder.
+pub enum CopilotDecoder {
+    /// The Chat Completions or Responses state machine.
+    OpenAi(OpenAiDecoder),
+    /// The Messages state machine.
+    Messages(MessagesDecoder),
+}
+
+impl<'id> Decoder<'id, Completion> for CopilotDecoder {
+    type Event = CopilotEvent<'id>;
+
+    fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
+        match self {
+            Self::OpenAi(decoder) => decoder.classify(frame).map(CopilotEvent::OpenAi),
+            Self::Messages(decoder) => decoder.classify(frame).map(CopilotEvent::Messages),
+        }
+    }
+
+    fn decode(
+        &mut self,
+        event: Self::Event,
+        out: Out<'id, Completion>,
+    ) -> Result<Flow, ProviderError> {
+        match (self, event) {
+            (Self::OpenAi(decoder), CopilotEvent::OpenAi(event)) => decoder.decode(event, out),
+            (Self::Messages(decoder), CopilotEvent::Messages(event)) => decoder.decode(event, out),
+            // The driver feeds each decoder only events from its own
+            // classifier.
+            (Self::OpenAi(_), CopilotEvent::Messages(_))
+            | (Self::Messages(_), CopilotEvent::OpenAi(_)) => Ok(Flow::More),
+        }
+    }
+
+    fn eof(&mut self, out: Out<'id, Completion>) -> Result<Flow, ProviderError> {
+        match self {
+            Self::OpenAi(decoder) => decoder.eof(out),
+            Self::Messages(decoder) => decoder.eof(out),
+        }
     }
 }
 

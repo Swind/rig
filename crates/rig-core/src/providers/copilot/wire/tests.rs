@@ -7,6 +7,7 @@
 use super::*;
 use crate::completion::CompletionRequest;
 use crate::message::Message;
+use crate::providers::copilot::GITHUB_COPILOT_API_BASE_URL;
 use crate::test_utils::{RecordingHttpClient, json_body};
 use crate::wire::Wire;
 use crate::wire::secret::tests::a_config_reloads_without_its_credential;
@@ -91,8 +92,8 @@ fn assert_same_requests(mut direct: http::Request<Body>, mut catalog: http::Requ
 fn a_manual_copilot_wrapper_keeps_its_envelope_after_deserialization() {
     let provider = OpenAIConfig::new("manual-token");
     for shared in [
-        provider.chat("model").into(),
-        provider.responses("model").into(),
+        OpenAiWire::from(provider.chat("model")).into(),
+        OpenAiWire::from(provider.responses("model")).into(),
     ] {
         let wire = CopilotWire {
             wire: shared,
@@ -101,8 +102,13 @@ fn a_manual_copilot_wrapper_keeps_its_envelope_after_deserialization() {
         let mut reloaded: CopilotWire =
             serde_json::from_value(serde_json::to_value(&wire).unwrap()).unwrap();
         match &mut reloaded.wire {
-            OpenAiWire::Chat(wire) => wire.provider.api_key = "manual-token".into(),
-            OpenAiWire::Responses(wire) => wire.provider.api_key = "manual-token".into(),
+            CopilotRoute::OpenAi(OpenAiWire::Chat(wire)) => {
+                wire.provider.api_key = "manual-token".into()
+            }
+            CopilotRoute::OpenAi(OpenAiWire::Responses(wire)) => {
+                wire.provider.api_key = "manual-token".into()
+            }
+            CopilotRoute::Messages(wire) => wire.provider.api_key = "manual-token".into(),
         }
         for wire in [&wire, &reloaded] {
             let request = encoded(wire);
@@ -418,6 +424,178 @@ async fn the_model_listing_folds_its_recorded_catalogue() {
     assert_eq!(opus.r#type.as_deref(), Some("chat"));
 }
 
+/// The recorded `/models` reply, read as typed entries.
+async fn recorded_models() -> Vec<CopilotModel> {
+    let body = cassette_body("models/list_models_smoke.yaml", "then");
+    crate::driver::Model::new(
+        copilot().model_details(),
+        RecordingHttpClient::new(Bytes::from(body)),
+    )
+    .call(())
+    .await
+    .expect("the recorded catalogue folds")
+}
+
+fn recorded(models: &[CopilotModel], id: &str) -> CopilotModel {
+    models
+        .iter()
+        .find(|model| model.id == id)
+        .cloned()
+        .unwrap_or_else(|| panic!("the recorded catalogue names {id}"))
+}
+
+/// The body and request `wire` sends for `options`, prepared as the driver
+/// prepares it.
+fn sent_with(
+    wire: &CopilotWire,
+    options: crate::completion::GenerationOptions,
+) -> Result<(http::Request<Body>, serde_json::Value), crate::error::ProviderError> {
+    use crate::wire::Operation;
+    let request = CompletionRequest::new("hi").options(options);
+    let request = Completion::prepare(request, &wire.describe())?;
+    let request = wire.encode(request, Mode::Unary)?.request;
+    let Body::Bytes(bytes) = request.body() else {
+        return Err(crate::error::ProviderError::request("a JSON body"));
+    };
+    let body = serde_json::from_slice(bytes)?;
+    Ok((request, body))
+}
+
+fn effort(effort: crate::completion::Effort) -> crate::completion::GenerationOptions {
+    crate::completion::GenerationOptions::default()
+        .reasoning(crate::completion::Reasoning::Effort(effort))
+}
+
+#[tokio::test]
+async fn the_typed_listing_reads_endpoints_and_reasoning_controls() {
+    let models = recorded_models().await;
+    let opus = recorded(&models, "claude-opus-4.7");
+    assert_eq!(opus.vendor.as_deref(), Some("Anthropic"));
+    assert!(opus.serves("/v1/messages"));
+    let supports = &opus.capabilities.supports;
+    assert_eq!(
+        supports.reasoning_effort,
+        ["low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(
+        (supports.min_thinking_budget, supports.max_thinking_budget),
+        (Some(1024), Some(32000))
+    );
+    assert_eq!(supports.adaptive_thinking, Some(true));
+    assert_eq!(opus.capabilities.limits.max_output_tokens, Some(64000));
+
+    let reloaded: Vec<CopilotModel> =
+        serde_json::from_value(serde_json::to_value(&models).unwrap()).unwrap();
+    assert_eq!(reloaded, models);
+}
+
+#[tokio::test]
+async fn each_model_goes_to_the_endpoint_its_listing_names() {
+    let models = recorded_models().await;
+    for (id, endpoint) in [
+        ("claude-opus-4.7", CopilotEndpoint::Messages),
+        ("claude-sonnet-4.5", CopilotEndpoint::Messages),
+        ("gpt-5.4", CopilotEndpoint::Chat),
+        ("gemini-3.1-pro-preview", CopilotEndpoint::Chat),
+        ("gpt-5.5", CopilotEndpoint::Responses),
+        ("gpt-5.4-mini", CopilotEndpoint::Responses),
+        ("mai-code-1-flash", CopilotEndpoint::Responses),
+        ("gpt-5.3-codex", CopilotEndpoint::Responses),
+        // No endpoints listed: the id decides.
+        ("gpt-4o", CopilotEndpoint::Chat),
+    ] {
+        let model = recorded(&models, id);
+        assert_eq!(model.endpoint(), endpoint, "{id}");
+        let wire = copilot().completion_for(&model);
+        assert_eq!(wire.endpoint(), endpoint, "{id}");
+        let path = match endpoint {
+            CopilotEndpoint::Chat => "/chat/completions",
+            CopilotEndpoint::Responses => "/responses",
+            CopilotEndpoint::Messages => "/v1/messages",
+        };
+        let request = encoded(&wire);
+        assert_eq!(
+            request.uri().to_string(),
+            format!("{GITHUB_COPILOT_API_BASE_URL}{path}"),
+            "{id}"
+        );
+        assert_eq!(
+            request.headers()[http::header::AUTHORIZATION],
+            "Bearer tid=copilot-session-token",
+            "{id}"
+        );
+        assert_eq!(request.headers()["copilot-integration-id"], "vscode-chat");
+        assert!(request.headers().get("x-api-key").is_none(), "{id}");
+    }
+}
+
+#[tokio::test]
+async fn messages_reasoning_follows_the_listing() {
+    use crate::completion::{Effort, GenerationOptions, Reasoning};
+    let models = recorded_models().await;
+
+    let opus = copilot().completion_for(&recorded(&models, "claude-opus-4.7"));
+    let reloaded: CopilotWire =
+        serde_json::from_value(serde_json::to_value(&opus).unwrap()).unwrap();
+    assert_eq!(reloaded.endpoint(), CopilotEndpoint::Messages);
+    let (_, body) = sent_with(&opus, effort(Effort::XHigh)).expect("opus takes xhigh");
+    assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
+    assert_eq!(
+        body["output_config"],
+        serde_json::json!({"effort": "xhigh"})
+    );
+    assert_eq!(
+        body["max_tokens"], 16000,
+        "the unary ceiling is the default"
+    );
+
+    let sonnet_4_6 = copilot().completion_for(&recorded(&models, "claude-sonnet-4.6"));
+    assert!(sent_with(&sonnet_4_6, effort(Effort::XHigh)).is_err());
+
+    let sonnet_4_5 = copilot().completion_for(&recorded(&models, "claude-sonnet-4.5"));
+    assert!(sent_with(&sonnet_4_5, effort(Effort::High)).is_err());
+    let (_, body) = sent_with(
+        &sonnet_4_5,
+        GenerationOptions::default().reasoning(Reasoning::Budget { tokens: 4096 }),
+    )
+    .expect("sonnet 4.5 takes a budget");
+    assert_eq!(
+        body["thinking"],
+        serde_json::json!({"type": "enabled", "budget_tokens": 4096})
+    );
+    let (_, body) = sent_with(
+        &sonnet_4_5,
+        GenerationOptions::default().reasoning(Reasoning::Off),
+    )
+    .expect("thinking turns off");
+    assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
+}
+
+#[tokio::test]
+async fn openai_shaped_reasoning_follows_the_listing() {
+    use crate::completion::{Effort, GenerationOptions, Reasoning};
+    let models = recorded_models().await;
+
+    let gemini = copilot().completion_for(&recorded(&models, "gemini-3.5-flash"));
+    let (_, body) = sent_with(&gemini, effort(Effort::Minimal)).expect("gemini takes minimal");
+    assert_eq!(body["reasoning_effort"], "minimal");
+    assert!(
+        sent_with(
+            &gemini,
+            GenerationOptions::default().reasoning(Reasoning::Off)
+        )
+        .is_err()
+    );
+
+    let gpt = copilot().completion_for(&recorded(&models, "gpt-5.4"));
+    let (_, body) = sent_with(&gpt, GenerationOptions::default().reasoning(Reasoning::Off))
+        .expect("gpt-5.4 lists `none`");
+    assert_eq!(body["reasoning_effort"], "none");
+
+    let gpt_4o = copilot().completion_for(&recorded(&models, "gpt-4o"));
+    assert!(sent_with(&gpt_4o, effort(Effort::High)).is_err());
+}
+
 // ── the configuration is storable data ──────────────────────────────────
 
 /// A wire is data a host may store in a scene, a component or a config
@@ -514,7 +692,8 @@ fn configured_outbound_endpoints_remain_explicit_after_rotation() {
                                 .with_base_url(base)
                                 .openai()
                                 .with_route(route)
-                                .completion(model),
+                                .completion(model)
+                                .into(),
                             intent: CopilotIntent::default(),
                         }),
                         request,

@@ -13,7 +13,7 @@ use crate::completion::options::{Mapping, OptionFields, OptionMap};
 use crate::completion::{CacheRetention, CompletionRequest, Effort, Reasoning, ServiceTier};
 use crate::message::ToolChoice;
 
-use super::wire::{ANTHROPIC, MINIMAX, MOONSHOT, Messages, XIAOMIMIMO, ZAI};
+use super::wire::{ANTHROPIC, COPILOT, MINIMAX, MOONSHOT, Messages, XIAOMIMIMO, ZAI};
 
 /// The `thinking` and `output_config` Anthropic's Messages API takes for
 /// `reasoning` on the model `spec` describes (`None`: a model the catalog
@@ -160,6 +160,7 @@ pub(super) fn map_options(
         name if name == MINIMAX.name => minimax(model, fields),
         name if name == XIAOMIMIMO.name => xiaomimimo(request, has_tools, fields),
         name if name == ZAI.name || name == MOONSHOT.name => implicit_cache_gateway(fields),
+        name if name == COPILOT.name => copilot(wire, model, max_tokens, fields),
         _ => unknown(fields),
     }
 }
@@ -358,6 +359,43 @@ fn implicit_cache_gateway(fields: OptionFields<'_>) -> OptionMap {
             true => Mapping::Omit("parallel tool use is the default"),
             false => Mapping::unsupported(UNVERIFIED),
         }),
+        top_p: Mapping::of(top_p, |_| Mapping::unsupported(UNVERIFIED)),
+        seed: Mapping::of(seed, |_| Mapping::unsupported(UNVERIFIED)),
+        stop: Mapping::of_stop(stop, |_| Mapping::unsupported(UNVERIFIED)),
+    }
+}
+
+/// GitHub Copilot's Messages endpoint: Claude's `thinking` and
+/// `output_config`, checked against the Copilot facts for `model` (the
+/// spec [`completion_for`](crate::providers::copilot::Copilot::completion_for)
+/// binds from `/models`, else the catalog's Copilot row). No other option
+/// is recorded.
+fn copilot(
+    wire: &Messages,
+    model: &str,
+    max_tokens: Option<u64>,
+    fields: OptionFields<'_>,
+) -> OptionMap {
+    let OptionFields {
+        reasoning,
+        cache,
+        service_tier,
+        verbosity,
+        parallel_tool_calls: parallel,
+        top_p,
+        seed,
+        stop,
+    } = fields;
+    const UNVERIFIED: &str = "unverified for copilot";
+    let spec = wire.facts.for_model(COPILOT.name, model);
+    OptionMap {
+        reasoning: Mapping::of(reasoning, |reasoning| {
+            claude_reasoning(spec, reasoning, max_tokens)
+        }),
+        cache: Mapping::of(cache, |_| Mapping::unsupported(UNVERIFIED)),
+        service_tier: Mapping::of(service_tier, |_| Mapping::unsupported(UNVERIFIED)),
+        verbosity: Mapping::of(verbosity, |_| Mapping::unsupported(UNVERIFIED)),
+        parallel_tool_calls: Mapping::of(parallel, |_| Mapping::unsupported(UNVERIFIED)),
         top_p: Mapping::of(top_p, |_| Mapping::unsupported(UNVERIFIED)),
         seed: Mapping::of(seed, |_| Mapping::unsupported(UNVERIFIED)),
         stop: Mapping::of_stop(stop, |_| Mapping::unsupported(UNVERIFIED)),

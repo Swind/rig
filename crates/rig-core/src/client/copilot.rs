@@ -7,6 +7,7 @@ use crate::error::ProviderError;
 use crate::model::ModelList;
 
 use crate::providers::copilot::auth::{AuthError, Authenticator};
+use crate::providers::copilot::model_listing::CopilotModel;
 use crate::providers::copilot::wire::{CopilotConfig, CopilotWire, Embeddings};
 
 http_client!(
@@ -33,9 +34,33 @@ impl Copilot {
         Ok(CopilotConfig::from_env()?.client())
     }
 
-    /// The completion model for `model`, on whichever route answers it.
+    /// The completion model for `model`, routed by its id alone: Responses
+    /// for a Codex id, Chat Completions otherwise. Prefer
+    /// [`Self::completion_for`] with the model's `/models` entry.
     pub fn completion(&self, model: impl Into<String>) -> Model<CopilotWire> {
         self.model(self.config.completion(model))
+    }
+
+    /// The completion model for `model` as `/models` describes it: on the
+    /// endpoint its entry names ([`CopilotModel::endpoint`]), with its
+    /// reasoning controls and limits ([`CopilotModel::spec`]) checking every
+    /// request. Keep the entries [`Self::models`] returns, or a serialized
+    /// copy, to build models without listing again.
+    ///
+    /// ```no_run
+    /// use rig_core::providers::copilot::Copilot;
+    ///
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let copilot = Copilot::from_env()?;
+    /// let models = copilot.models().await?;
+    /// let opus = models.iter().find(|model| model.id == "claude-opus-4.7").ok_or("unlisted")?;
+    /// let completion = copilot.completion_for(opus);
+    /// # let _ = completion;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn completion_for(&self, model: &CopilotModel) -> Model<CopilotWire> {
+        self.model(self.config.completion_for(model))
     }
 
     /// The embedding model for `model`, `ndims` wide when set.
@@ -46,6 +71,12 @@ impl Copilot {
     /// The models this session can use.
     pub async fn list_models(&self) -> Result<ModelList, ProviderError> {
         self.model(self.config.models()).list().await
+    }
+
+    /// The models this session can use, each with the endpoints and
+    /// controls [`Self::completion_for`] reads.
+    pub async fn models(&self) -> Result<Vec<CopilotModel>, ProviderError> {
+        self.model(self.config.model_details()).call(()).await
     }
 
     /// A client on this client's transport, configured with the session

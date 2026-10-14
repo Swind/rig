@@ -37,7 +37,7 @@
 //! and review `crates/rig-cassette/fixtures/cassettes/copilot/raw_stream_capture_matrix/`.
 
 use rig::providers::copilot;
-use rig::providers::openai::wire::OpenAiWire;
+use rig::providers::copilot::wire::CopilotEndpoint;
 use serde_json::Value;
 
 use crate::cassettes::CassetteMode;
@@ -130,7 +130,7 @@ async fn chat_stream_raw_terminal_round_trips_provider_type() {
         |client| async move {
             let model = client.completion(CHAT_MODEL);
             assert!(
-                matches!(model.wire.wire, OpenAiWire::Chat(_)),
+                model.wire.endpoint() == CopilotEndpoint::Chat,
                 "premise: gpt-4o routes through chat completions"
             );
             capture_terminal(model, request(), sink).await
@@ -220,7 +220,7 @@ async fn responses_stream_raw_terminal_round_trips_provider_type() {
         |client| async move {
             let model = client.completion(RESPONSES_MODEL);
             assert!(
-                matches!(model.wire.wire, OpenAiWire::Responses(_)),
+                model.wire.endpoint() == CopilotEndpoint::Responses,
                 "premise: the codex model routes through the Responses API"
             );
             capture_terminal(model, request(), sink).await
